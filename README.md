@@ -46,10 +46,14 @@
 三条命令：
 
 ```sh
-just fetch-assets ./vendor-assets --patch   # 抓资源并打 relay patch
+just fetch-assets ./vendor-assets             # 抓资源（只读，不改写任何文件）
 just serve 10.8.0.1 8899 ./vendor-assets https://zcode.internal
 # 按启动时打印的配置改桌面端 .desktop，重启 ZCode，开「Web 远程控制」，扫码
 ```
+
+`serve` 会在启动前完成预检并把 relay patch 套在**内存 overlay** 上——磁盘上的
+厂商资源始终是原始镜像，`manifest.json` 的 sha256 始终可校验。**预检不通过时
+拒绝启动**，避免 SPA 悄悄连回厂商 relay 而你以为自托管成功了。
 
 启动报告会直接打印可粘贴的桌面端配置：
 

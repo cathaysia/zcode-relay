@@ -33,6 +33,22 @@ It is not a fork of ZCode; it speaks the wire protocol documented in
 - Every bug fix MUST add a regression test in the same commit.
 - The command `just test` and `just lint` MUST pass.
 
+## Vendor Asset Handling
+
+- Vendor SPA bundles, patched output, and fetched assets MUST NOT be committed.
+  They are copyrighted vendor code; committing them is redistribution.
+  `.gitignore` enforces this.
+- `fetch-assets` MUST NOT write anything except the fetched tree and
+  `manifest.json`. It is a mirror; its sha256 values are the drift baseline.
+- All vendor-tree rewrites MUST happen in memory at serve time. The entry
+  bundle patch and the shell meta injection are the only two, and neither may
+  mutate disk.
+- A patched entry bundle MUST NOT be served with `immutable` cache headers —
+  its content no longer matches the hash in its filename.
+- `serve` MUST fail closed: if the entry patch cannot be applied, it MUST
+  refuse to start. Starting unpatched silently sends the SPA to the vendor
+  relay while the operator believes self-hosting is in effect.
+
 ## Protocol Constraints
 
 These are load-bearing and MUST NOT be relaxed:
@@ -50,8 +66,3 @@ These are load-bearing and MUST NOT be relaxed:
   mandatory send on authentication.
 - No WS message larger than `MAX_PHYSICAL_FRAME_BYTES` may be sent.
 
-## Vendor Assets
-
-Vendor SPA bundles, patched output, and fetched assets MUST NOT be committed.
-They are copyrighted vendor code; committing them is redistribution.
-`.gitignore` enforces this.

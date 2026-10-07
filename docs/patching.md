@@ -71,10 +71,21 @@ overrideUrl:document.querySelector('meta[name="zcode-relay-ws"]')?.content
 
 ```sh
 just patch-check <bundle>            # 检查锚点，输出 sha256 与偏移
-just patch-apply <in> <out>          # 应用 patch
+just patch-apply <in> <out>          # 应用 patch，写出到指定路径
 ```
 
 注意 `overrideUrl:` 在锚点与替换表达式中相同，故字节级 diff 的首个差异点落在锚点内部（+12 字节处），这是预期现象。
+
+### 2.2 正常部署不需要手动 patch
+
+`just serve` 会在启动预检时把上述 patch 套在**内存 overlay** 上，磁盘上的厂商
+资源保持原样（见 `docs/deploy.md §2.3`）。`just patch-apply` 只用于两处：
+
+- 你打算用静态服务器（nginx 等）而不是内置 asset server，需要一份落盘的产物；
+- 排查漂移时想先看看 patch 的结果。
+
+抓取工具 `fetch-assets` **不改写任何文件**，因此 `manifest.json` 里的 sha256
+始终是厂商资源的可信基线。
 
 ## 3. 是否还有其他必须改的地址
 

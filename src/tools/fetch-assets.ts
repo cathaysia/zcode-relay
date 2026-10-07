@@ -10,8 +10,9 @@
  *
  * 抓下来的是厂商著作权代码，**.gitignore 已排除，不要提交**。
  *
- * 提示：抓完还要对 index-<hash>.js 打一次 relay patch（docs/patching.md §2）。
- * 或者直接用全量 patch 模式（--patch）让本工具顺手完成。
+ * 本工具**不改写任何文件**：抓下来的树是厂商资源的忠实镜像，manifest.json
+ * 里的 sha256 始终可校验。relay patch 在启动服务时套用（内存 overlay），
+ * 见 src/serve/main.ts。
  */
 
 import { mkdir, writeFile, readFile, access } from "node:fs/promises";
@@ -24,7 +25,7 @@ import {
   kindOf,
   type AssetKind,
 } from "./asset-graph.ts";
-import { applyRelayPatch, inspectAnchors } from "./patch-spa.ts";
+import { inspectAnchors } from "./patch-spa.ts";
 
 const DEFAULT_ORIGIN = "https://zcode.z.ai";
 const DEFAULT_DELAY_MS = 50;
@@ -35,7 +36,6 @@ interface Options {
   readonly limit: number;
   readonly delayMs: number;
   readonly dryRun: boolean;
-  readonly patch: boolean;
 }
 
 function parseArgs(argv: string[]): Options | null {
@@ -44,14 +44,11 @@ function parseArgs(argv: string[]): Options | null {
   let limit = Number.POSITIVE_INFINITY;
   let delayMs = DEFAULT_DELAY_MS;
   let dryRun = false;
-  let patch = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--dry-run") {
       dryRun = true;
-    } else if (arg === "--patch") {
-      patch = true;
     } else if (arg === "--limit") {
       const value = argv[i + 1];
       if (value === undefined) return null;
@@ -77,16 +74,15 @@ function parseArgs(argv: string[]): Options | null {
   const outDir = positional[0];
   if (outDir === undefined) return null;
   if (!Number.isFinite(delayMs) || delayMs < 0) return null;
-  return { outDir, origin, limit, delayMs, dryRun, patch };
+  return { outDir, origin, limit, delayMs, dryRun };
 }
 
 function usage(): void {
-  console.error("用法: fetch-assets.ts <outDir> [--limit N] [--delay ms] [--dry-run] [--patch] [--base <origin>]");
+  console.error("用法: fetch-assets.ts <outDir> [--limit N] [--delay ms] [--dry-run] [--base <origin>]");
   console.error("");
   console.error("  --limit N    最多新抓 N 个文件（先用小值验证）");
   console.error("  --delay ms   每次请求间隔，默认 50");
   console.error("  --dry-run    只算依赖图，不写盘");
-  console.error("  --patch      抓取后对入口 bundle 应用 relay patch");
   console.error("  --base URL   资源站源，默认 https://zcode.z.ai");
 }
 
@@ -115,7 +111,7 @@ async function main(): Promise<number> {
     usage();
     return 2;
   }
-  const { outDir, origin, limit, delayMs, dryRun, patch } = options;
+  const { outDir, origin, limit, delayMs, dryRun } = options;
 
   const assetsDir = join(outDir, "assets");
   await mkdir(assetsDir, { recursive: true });
@@ -246,34 +242,32 @@ async function main(): Promise<number> {
   await writeFile(join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
   console.log(`清单已写出: ${join(outDir, "manifest.json")}`);
 
-  // ---- 5. 可选：顺手打 patch ----
+  // ---- 5. 入口 bundle 的 patch 可行性检查（只读，不改写）----
   const entry = fetched.find((f) => /^index-.*\.js$/.test(f.name));
   if (entry === undefined) {
     console.log("");
-    console.log("未找到入口 bundle（index-<hash>.js），跳过 patch。");
-    return 0;
-  }
-  const entryPath = join(assetsDir, entry.name);
-
-  if (!patch) {
-    const anchor = inspectAnchors(await readFile(entryPath, "utf8")).patchable;
-    console.log("");
-    console.log(`入口 bundle: ${entry.name}`);
-    console.log(`patch 锚点: ${anchor ? "可直接 patch" : "锚点不匹配，需人工确认"}`);
-    console.log(`下一步: just patch-apply ${entryPath} ${entryPath}`);
+    console.log("未找到入口 bundle（index-<hash>.js）。");
+    console.log("若本次因 --limit 提前结束，重跑本命令继续抓取后再检查。");
     return 0;
   }
 
-  const source = await readFile(entryPath, "utf8");
-  const patched = applyRelayPatch(source);
-  if (patched === source) {
-    console.log("");
-    console.log(`入口 bundle 已是 patch 状态，无需改动: ${entry.name}`);
-    return 0;
-  }
-  await writeFile(entryPath, patched, "utf8");
+  const anchors = inspectAnchors(await readFile(join(assetsDir, entry.name), "utf8"));
   console.log("");
-  console.log(`已 patch 入口 bundle: ${entry.name}`);
+  console.log(`入口 bundle: ${entry.name}`);
+  if (anchors.patchable) {
+    console.log("patch 锚点: 可直接 patch");
+  } else if (anchors.alreadyPatched) {
+    console.log("patch 锚点: 已被 patch 过（磁盘上不应出现，请确认是否手工改过）");
+  } else {
+    console.log(
+      `patch 锚点: 不匹配（overrideUrl:void 0 × ${String(anchors.overrideCount)}，` +
+        `上下文锚点 × ${String(anchors.functionCount)}，均应为 1）`,
+    );
+    console.log("           厂商构建可能已变化，见 docs/patching.md §5");
+  }
+  console.log("");
+  console.log("抓取不改写任何文件，vendor-assets 与厂商站一一对应，manifest.json 可校验。");
+  console.log("relay patch 在启动服务时套用（内存 overlay），见 docs/deploy.md §2.2。");
   return 0;
 }
 

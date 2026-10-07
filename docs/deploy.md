@@ -36,7 +36,7 @@ ES module 语义也依赖同源。因此资源必须托管在**同一源的精�
 
 ## 2. 部署步骤
 
-### 2.1 抓取并 patch 资源
+### 2.1 抓取资源
 
 先小批量验证，再全量。全量约 2100 个文件，工具默认串行 + 50ms 间隔。
 
@@ -46,10 +46,10 @@ just fetch-assets ./vendor-assets --limit 3
 
 # 确认无误后全量；可重复运行，已抓的会跳过（断点续抓）
 just fetch-assets ./vendor-assets
-
-# 让工具顺手把 relay patch 打上
-just fetch-assets ./vendor-assets --patch
 ```
+
+**抓取不改写任何文件**：抓下来的树是厂商资源的忠实镜像，`manifest.json` 里的
+sha256 始终可校验，重新抓取也不会与 patch 打架。
 
 产出：
 
@@ -59,16 +59,9 @@ just fetch-assets ./vendor-assets --patch
 | `vendor-assets/assets/**` | 带内容哈希的 chunk 与静态资源 |
 | `vendor-assets/manifest.json` | 抓取清单与各文件 sha256，用于漂移检测 |
 
-若不带 `--patch`，手动打：
-
-```sh
-just patch-check ./vendor-assets/assets/index-<hash>.js
-just patch-apply ./vendor-assets/assets/index-<hash>.js ./vendor-assets/assets/index-<hash>.js
-```
-
 `vendor-assets/` 已在 `.gitignore` 中——那是厂商著作权代码，不要提交。
 
-### 2.2 启动服务
+### 2.2 启动服务（自动完成 patch）
 
 ```sh
 # 本机自测
@@ -78,9 +71,59 @@ just serve 127.0.0.1 8899 ./vendor-assets http://127.0.0.1:8899
 just serve 10.8.0.1 8899 /srv/zcode-relay/vendor-assets https://zcode.internal
 ```
 
-启动时会打印**可直接粘贴的桌面端配置**，包括正确推导出的 relay 与链接地址。
+启动前会做**预检**并把两处改写套在**内存 overlay** 上，磁盘上的厂商资源保持原样：
 
-### 2.3 配置桌面端
+| 改写 | 位置 | 目的 |
+|---|---|---|
+| 注入 `<meta name="zcode-relay-ws">` | 外壳 | 告诉 SPA relay 地址，无需手改 HTML |
+| 套用 relay patch | 入口 `index-<hash>.js` | 让 `B4t()` 读取上面的 meta |
+
+预检报告形如：
+
+```
+预检
+  外壳        20707 字节
+  入口 bundle index-B-ilXaCQ.js
+  relay patch applied
+              内存 overlay：4821509 → 4821644 字节（磁盘文件未改动）
+```
+
+**预检不通过时拒绝启动**。`app.asar` 的教训是"静默失败最贵"——如果 anchors
+不匹配而照常启动，SPA 会**悄悄连回厂商 relay**，你以为自托管成功了其实没有。
+所以这里选择硬失败，附上排查步骤；仅排查时可用 `ZCODE_SERVE_ALLOW_UNPATCHED=1`
+强制启动。
+
+三个开关（排查用）：
+
+| 环境变量 | 作用 |
+|---|---|
+| `ZCODE_SERVE_NO_PATCH=1` | 跳过入口 patch（SPA 连回厂商 relay） |
+| `ZCODE_SERVE_ALLOW_UNPATCHED=1` | 预检失败仍启动 |
+| `ZCODE_RELAY_PATH` | 改 WebSocket 路径（默认 `/ws`） |
+
+### 2.3 为什么用内存 overlay 而不是原地改文件
+
+原地 patch 有四个实际问题，overlay 全部避开：
+
+1. **清单失去意义**——`manifest.json` 的 sha256 是抓取时算的，原地改写后对不上，
+   漂移检测就没有可信基线了。
+2. **无法区分原始与已 patch**——出问题时无法判断磁盘上那份是否被动过。
+3. **与重新抓取冲突**——重抓会覆盖 patch，或让工具误判"已存在"而跳过。
+4. **入口 bundle 的缓存头必须变**——内容已与文件名里的哈希不符，不能再宣称
+   `immutable`（否则浏览器把打过补丁的版本钉住一年，将来换 relay 地址无法更新）。
+   overlay 方案能精确地只对这个文件用 `no-store`。
+
+若你打算用 nginx 之类的静态服务器而不是内置的 asset server，则需要一份落在磁盘上的
+patch 产物：
+
+```sh
+just patch-check ./vendor-assets/assets/index-<hash>.js
+just patch-apply ./vendor-assets/assets/index-<hash>.js ./patched/index-<hash>.js
+```
+
+注意此时**必须自行处理 meta 注入与缓存头**——这两件事内置服务已代劳。
+
+### 2.4 配置桌面端
 
 编辑 `~/.local/share/applications/zcode.desktop`，在 `Exec` 前加 `env`：
 
@@ -102,7 +145,7 @@ Exec=env \
 
 **注意**：`ZCODE_BASE_URL` / `ZCODE_ENDPOINT_ORIGIN` **不影响** relay，别用它们。
 
-### 2.4 访问
+### 2.5 访问
 
 重启 ZCode → 界面里开启「Web 远程控制」→ 用手机扫桌面端显示的二维码。
 
