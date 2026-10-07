@@ -1,0 +1,22 @@
+# 厂商 SPA 资源与派生产物：不要提交。
+# 这些是厂商著作权代码，纳入版本库等同于再分发。只提交我们自己的代码与文档。
+vendor-assets/
+patched/
+dist/
+*.asar
+
+# MITM / 审计临时产物
+certs/
+*.pem
+*.key
+*.crt
+
+# 依赖与构建
+node_modules/
+target/
+build/
+
+# 本地配置（含真实 relay 地址）
+.env
+.env.local
+relay.config.local.*
