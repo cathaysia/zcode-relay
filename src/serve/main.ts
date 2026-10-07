@@ -13,7 +13,7 @@
  *   ZCODE_ASSETS_DIR      抓取所得的厂商资源目录（必填）
  *   ZCODE_PUBLIC_ORIGIN   对外地址，如 https://zcode.internal（用于推导 wss 地址）
  *   ZCODE_RELAY_HOST      监听地址（默认 127.0.0.1，部署时设为 VPN 接口）
- *   ZCODE_RELAY_PORT      监听端口（默认 8899）
+ *   ZCODE_RELAY_PORT      监听端口（默认 18899）
  *   ZCODE_RELAY_PATH      WebSocket 路径（默认 /ws）
  *   ZCODE_SERVE_NO_PATCH=1        关闭入口 patch（SPA 会连回厂商 relay）
  *   ZCODE_SERVE_ALLOW_UNPATCHED=1 预检失败时仍启动（仅供排查，不推荐）
@@ -52,7 +52,7 @@ function envFlag(name: string): boolean {
 }
 
 const host = envString("ZCODE_RELAY_HOST", "127.0.0.1");
-const port = Number(envString("ZCODE_RELAY_PORT", "8899"));
+const port = Number(envString("ZCODE_RELAY_PORT", "18899"));
 const wsPath = envString("ZCODE_RELAY_PATH", "/ws");
 const assetsDir = process.env["ZCODE_ASSETS_DIR"]?.trim();
 // 空字符串等同于未设置，否则会推导出空地址

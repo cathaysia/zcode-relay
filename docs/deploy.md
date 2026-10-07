@@ -65,10 +65,10 @@ sha256 始终可校验，重新抓取也不会与 patch 打架。
 
 ```sh
 # 本机自测
-just serve 127.0.0.1 8899 ./vendor-assets http://127.0.0.1:8899
+just serve 127.0.0.1 18899 ./vendor-assets http://127.0.0.1:18899
 
 # 部署：绑到 VPN 接口，给出对外地址（用于推导 wss 与二维码链接）
-just serve 10.8.0.1 8899 /srv/zcode-relay/vendor-assets https://zcode.internal
+just serve 10.8.0.1 18899 /srv/zcode-relay/vendor-assets https://zcode.internal
 ```
 
 启动前会做**预检**并把两处改写套在**内存 overlay** 上，磁盘上的厂商资源保持原样：
@@ -161,7 +161,7 @@ https://zcode.internal/remote/v4?sid=<device_sid>&hash=<pass_hash>&t=<ts>
 
 两条路：
 
-- **在上游放反向代理**（nginx/caddy）终止 TLS，转发到本服务的 8899。这是推荐做法——证书续期、HTTP/2、访问日志都由代理负责。
+- **在上游放反向代理**（nginx/caddy）终止 TLS，转发到本服务的 18899。这是推荐做法——证书续期、HTTP/2、访问日志都由代理负责。
 - 或让本服务直接用证书启动，但当前实现未内置 TLS，需要自行包一层。
 
 若只在 VPN 内且所有客户端都接受 http，可以不改；但手机浏览器对 http 页面的
@@ -171,19 +171,19 @@ https://zcode.internal/remote/v4?sid=<device_sid>&hash=<pass_hash>&t=<ts>
 
 ```sh
 # 端口在听
-ss -tlnp | grep 8899
+ss -tlnp | grep 18899
 
 # 状态页（会打印资源根目录与端点）
-curl -s http://127.0.0.1:8899/
+curl -s http://127.0.0.1:18899/
 
 # 外壳，并确认 relay 地址已注入
-curl -s http://127.0.0.1:8899/remote/v4 | grep -o 'zcode-relay-ws[^>]*'
+curl -s http://127.0.0.1:18899/remote/v4 | grep -o 'zcode-relay-ws[^>]*'
 
 # 入口 bundle，确认类型与缓存头
-curl -sI http://127.0.0.1:8899/remote/v4/latest/assets/index-<hash>.js
+curl -sI http://127.0.0.1:18899/remote/v4/latest/assets/index-<hash>.js
 
 # relay 是否可用（应先跑通协议核对工具）
-just echo-relay 127.0.0.1 8899
+just echo-relay 127.0.0.1 18899
 ```
 
 推荐顺序：**先用 `echo-relay` 让真实桌面端连一次**，确认它能完成注册与认证，

@@ -3,7 +3,7 @@
  *
  * 环境变量：
  *   ZCODE_RELAY_HOST  监听地址（默认 127.0.0.1；部署时应设为 VPN 接口地址）
- *   ZCODE_RELAY_PORT  监听端口（默认 8899）
+ *   ZCODE_RELAY_PORT  监听端口（默认 18899）
  *   ZCODE_RELAY_PATH  WS 升级路径（默认 /ws）
  *
  * 安全提醒：relay 在内存中持有 pass_hash（见 docs/design.md §S5）。
@@ -40,7 +40,7 @@ function envPort(name: string, fallback: number): number {
 }
 
 const host = envString("ZCODE_RELAY_HOST", "127.0.0.1");
-const port = envPort("ZCODE_RELAY_PORT", 8899);
+const port = envPort("ZCODE_RELAY_PORT", 18899);
 const path = envString("ZCODE_RELAY_PATH", "/ws");
 
 if (host === "0.0.0.0" || host === "::") {

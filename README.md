@@ -47,7 +47,7 @@
 
 ```sh
 just fetch-assets ./vendor-assets             # 抓资源（只读，不改写任何文件）
-just serve 10.8.0.1 8899 ./vendor-assets https://zcode.internal
+just serve 10.8.0.1 18899 ./vendor-assets https://zcode.internal
 # 按启动时打印的配置改桌面端 .desktop，重启 ZCode，开「Web 远程控制」，扫码
 ```
 
@@ -73,14 +73,14 @@ just install
 just test      # 42 个用例
 just lint      # 类型检查（Node 的类型擦除不做检查，故单独一道）
 
-# 启动 relay（默认 127.0.0.1:8899；部署时应改为 VPN 接口地址）
-just relay <vpn-ip> 8899
+# 启动 relay（默认 127.0.0.1:18899；部署时应改为 VPN 接口地址）
+just relay <vpn-ip> 18899
 ```
 
 设备端配置（`~/.local/share/applications/zcode.desktop` 的 `Exec` 前加 `env`）：
 
 ```
-ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://<你的地址>:8899/ws
+ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://<你的地址>:18899/ws
 ZCODE_WEB_REMOTE_CONTROL_URL=https://<你的地址>/remote/v4
 ```
 
@@ -91,9 +91,9 @@ ZCODE_WEB_REMOTE_CONTROL_URL=https://<你的地址>/remote/v4
 客户端一致**（编码、HMAC 构造、角色绑定）。
 
 ```sh
-just echo-relay 127.0.0.1 8899
+just echo-relay 127.0.0.1 18899
 # 另一个终端：
-ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:8899/ws /opt/ZCode/zcode
+ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:18899/ws /opt/ZCode/zcode
 # 然后在界面里开启「Web 远程控制」
 ```
 

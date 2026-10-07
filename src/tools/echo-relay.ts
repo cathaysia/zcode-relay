@@ -9,8 +9,8 @@
  * 本仓库的协议实现（编码、HMAC 构造、角色绑定）与真实客户端一致。
  *
  * 用法：
- *   just echo-relay 127.0.0.1 8899
- *   ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:8899/ws /opt/ZCode/zcode
+ *   just echo-relay 127.0.0.1 18899
+ *   ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:18899/ws /opt/ZCode/zcode
  *   然后在桌面端点击「Web 远程控制」。
  *
  * 环境变量：
@@ -137,7 +137,7 @@ const logger: Logger = {
 };
 
 const host = process.env["ZCODE_RELAY_HOST"]?.trim() ?? "127.0.0.1";
-const port = Number(process.env["ZCODE_RELAY_PORT"]?.trim() ?? "8899");
+const port = Number(process.env["ZCODE_RELAY_PORT"]?.trim() ?? "18899");
 const path = process.env["ZCODE_RELAY_PATH"]?.trim() ?? "/ws";
 
 const server = new RelayServer({ host, port, path, logger, tap });

@@ -13,11 +13,11 @@ lint:
     npx tsc --noEmit
 
 # 启动 relay（默认仅监听 VPN 接口，地址由环境变量给出）
-relay host="127.0.0.1" port="8899":
+relay host="127.0.0.1" port="18899":
     ZCODE_RELAY_HOST={{host}} ZCODE_RELAY_PORT={{port}} node src/relay/main.ts
 
 # 启动 echo relay：记录设备端实际发出的报文，用于核对 protocol.md
-echo-relay host="127.0.0.1" port="8899":
+echo-relay host="127.0.0.1" port="18899":
     ZCODE_RELAY_HOST={{host}} ZCODE_RELAY_PORT={{port}} node src/tools/echo-relay.ts
 
 # 检查 SPA bundle 的 patch 锚点（漂移检测）
@@ -33,7 +33,7 @@ fetch-assets outdir *args:
     node src/tools/fetch-assets.ts {{outdir}} {{args}}
 
 # 单端口部署：同端口提供 SPA 资源与 relay WebSocket
-serve host="127.0.0.1" port="8899" assetsdir="vendor-assets" origin="":
+serve host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="":
     #!/usr/bin/env bash
     set -euo pipefail
     export ZCODE_RELAY_HOST={{host}}
