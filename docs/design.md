@@ -80,6 +80,8 @@ Web 端 relay 地址硬编码（`overrideUrl: void 0`），因此"终端如何�
 | `patch-tool` | 提取、patch、漂移检测 SPA 资源 | 厂商资源 → 自托管资源 |
 | `asset-server` | 静态托管 patched SPA | HTTP → 资源 |
 
+模块到文件的映射：`ws-acceptor` → `src/relay/server.ts`；`authenticator`、`pairing`、`router`、`heartbeat` 与 `session-registry` → `src/relay/relay.ts` 与 `src/relay/registry.ts`；`Conn` 抽象 → `src/relay/conn.ts`。`patch-tool` 与 `asset-server` 尚未实现。
+
 **为什么把 relay 做成"笨管道"**：协议本身不带版本协商，`payload` 内部 schema 会随厂商升级而变，且应用层已有自己的分片、校验、ack 与降级机制。relay 若试图理解或规范化 `payload`，就会在厂商升级时成为故障点，并可能改写桥接身份三元组导致桥接永久降级。代价是 relay 无法做内容层面的过滤或审计——这对本项目的目标（内容不经第三方）无影响，因为 relay 与消费方同属自有控制域；若将来需要审计，正确的位置是终端侧解密之后，而非 relay。
 
 关键不变式：
