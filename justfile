@@ -27,3 +27,17 @@ patch-check file:
 # 对 SPA bundle 应用 patch
 patch-apply input output:
     node src/tools/patch-spa-cli.ts apply {{input}} {{output}}
+
+# 抓取 SPA 资源（先加 --limit 小批量验证，再全量）
+fetch-assets outdir *args:
+    node src/tools/fetch-assets.ts {{outdir}} {{args}}
+
+# 单端口部署：同端口提供 SPA 资源与 relay WebSocket
+serve host="127.0.0.1" port="8899" assetsdir="vendor-assets" origin="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ZCODE_RELAY_HOST={{host}}
+    export ZCODE_RELAY_PORT={{port}}
+    export ZCODE_ASSETS_DIR={{assetsdir}}
+    export ZCODE_PUBLIC_ORIGIN={{origin}}
+    exec node src/serve/main.ts

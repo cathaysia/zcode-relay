@@ -29,12 +29,38 @@
 |---|---|
 | 协议层（crypto / limits / messages） | 完成 |
 | relay 核心（认证 / 配对 / 路由 / 心跳） | 完成 |
-| WS 接入层 | 完成 |
-| 单元测试 + 端到端测试 | 53 个用例全绿 |
+| 资源托管（HTTP + 外壳注入 relay 地址） | 完成，已在真实资源上验证 |
+| 资源抓取（递归依赖图 + 断点续抓 + 清单） | 完成，已在真实站点上验证 |
+| 单端口部署入口（HTTP + WS 同端口） | 完成，已端到端验证 |
+| 单元测试 + 端到端测试 | 80 个用例全绿 |
 | 协议核对工具（echo-relay） | 完成，已冒烟验证 |
 | SPA patch 与漂移检测工具 | 完成，**已在真实厂商构建上验证可应用** |
-| 资源递归抓取 | 未开始（流程见 docs/patching.md §4） |
-| 部署与 VPN 绑定 | 未开始（需你的 VPN 与域名） |
+| TLS / VPN 绑定 | 未内置 TLS，建议上游反代，见 docs/deploy.md §3 |
+
+## 怎么访问
+
+**relay 本身不带 web**——它只服务 WebSocket。资源托管是独立模块，本仓库把它
+和 relay 放进**同一进程、同一端口**（`src/serve/main.ts`），所以只需一张证书、
+一个端口。完整部署步骤见 [docs/deploy.md](docs/deploy.md)。
+
+三条命令：
+
+```sh
+just fetch-assets ./vendor-assets --patch   # 抓资源并打 relay patch
+just serve 10.8.0.1 8899 ./vendor-assets https://zcode.internal
+# 按启动时打印的配置改桌面端 .desktop，重启 ZCode，开「Web 远程控制」，扫码
+```
+
+启动报告会直接打印可粘贴的桌面端配置：
+
+```
+Exec=env \
+  ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://zcode.internal/ws \
+  ZCODE_WEB_REMOTE_CONTROL_URL=https://zcode.internal/remote/v4 \
+  /opt/ZCode/zcode %U
+```
+
+relay 地址由服务端自动注入外壳的 meta 标签，不需要手改 HTML。
 
 ## 快速开始
 
@@ -78,6 +104,7 @@ TypeScript 直接跑在 Node 24 的类型擦除上：**无构建步骤**，测�
 
 | 文档 | 内容 |
 |---|---|
+| [docs/deploy.md](docs/deploy.md) | 部署与访问：三条命令、自检清单、常见问题 |
 | [docs/design.md](docs/design.md) | 设计方案：问题拆解、模块架构、BDD、接口 |
 | [docs/protocol.md](docs/protocol.md) | 逆向得到的 relay 协议完整规范（实现依据） |
 | [docs/patching.md](docs/patching.md) | SPA 提取、patch、漂移检测流程 |
