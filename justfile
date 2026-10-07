@@ -19,3 +19,11 @@ relay host="127.0.0.1" port="8899":
 # 启动 echo relay：记录设备端实际发出的报文，用于核对 protocol.md
 echo-relay host="127.0.0.1" port="8899":
     ZCODE_RELAY_HOST={{host}} ZCODE_RELAY_PORT={{port}} node src/tools/echo-relay.ts
+
+# 检查 SPA bundle 的 patch 锚点（漂移检测）
+patch-check file:
+    node src/tools/patch-spa-cli.ts check {{file}}
+
+# 对 SPA bundle 应用 patch
+patch-apply input output:
+    node src/tools/patch-spa-cli.ts apply {{input}} {{output}}

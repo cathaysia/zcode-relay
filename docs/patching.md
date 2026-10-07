@@ -47,6 +47,35 @@ overrideUrl:document.querySelector('meta[name="zcode-relay-ws"]')?.content
 
 **不要用字节偏移打补丁**——偏移每次构建都会变。用精确字符串匹配。
 
+## 2.1 已实测的 patch 可应用性
+
+`src/tools/patch-spa.ts` 实现了 §2 的 patch，并已在**真实厂商构建**上验证：
+
+| 项 | 值 |
+|---|---|
+| 文件 | `remote/v4/latest/assets/index-B-ilXaCQ.js` |
+| 大小 | 4 821 509 字节 |
+| sha256 | `ba8a371a8df195ae1014e9bc448e2db5c8b5c61b0907d1bf2a81cfb9e318eca4` |
+| `overrideUrl:void 0` 出现次数 | 1 |
+| `function B4t(){return Mae({endpointOrigin:` 出现次数 | 1 |
+| `overrideUrl:void 0` 字节偏移 | 4804033 |
+
+验证方法（不依赖字节偏移，因此可重复）：
+
+1. patch 后字节增量必须**恰好**等于 `len(新表达式) - len(锚点)` = 135。
+2. 首处差异之前的前缀与首处差异之后（按位移对齐）的后缀必须逐字节一致。
+   两项同时成立即证明全文件只有这一处改动。
+3. patch 产物通过 `node --check`（ESM 语法检查）。
+
+实测结果：前缀一致、后缀一致、增量 135，全部通过。命令：
+
+```sh
+just patch-check <bundle>            # 检查锚点，输出 sha256 与偏移
+just patch-apply <in> <out>          # 应用 patch
+```
+
+注意 `overrideUrl:` 在锚点与替换表达式中相同，故字节级 diff 的首个差异点落在锚点内部（+12 字节处），这是预期现象。
+
 ## 3. 是否还有其他必须改的地址
 
 在配对链接模式下（`/remote/v4?sid=&hash=&t=`），**只有 relay WS 一个地址需要重定向**，终端是纯 WS 的，不产生任何厂商 HTTP 调用。
