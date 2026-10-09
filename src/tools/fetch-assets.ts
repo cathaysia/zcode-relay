@@ -28,13 +28,15 @@ import {
 import { inspectAnchors } from "./patch-spa.ts";
 
 const DEFAULT_ORIGIN = "https://zcode.z.ai";
-const DEFAULT_DELAY_MS = 50;
+const DEFAULT_DELAY_MS = 0;
+const DEFAULT_CONCURRENCY = 8;
 
 interface Options {
   readonly outDir: string;
   readonly origin: string;
   readonly limit: number;
   readonly delayMs: number;
+  readonly concurrency: number;
   readonly dryRun: boolean;
 }
 
@@ -43,6 +45,7 @@ function parseArgs(argv: string[]): Options | null {
   let origin = DEFAULT_ORIGIN;
   let limit = Number.POSITIVE_INFINITY;
   let delayMs = DEFAULT_DELAY_MS;
+  let concurrency = DEFAULT_CONCURRENCY;
   let dryRun = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -59,6 +62,11 @@ function parseArgs(argv: string[]): Options | null {
       if (value === undefined) return null;
       delayMs = Number(value);
       i += 1;
+    } else if (arg === "--concurrency" || arg === "-c") {
+      const value = argv[i + 1];
+      if (value === undefined) return null;
+      concurrency = Number(value);
+      i += 1;
     } else if (arg === "--base") {
       const value = argv[i + 1];
       if (value === undefined) return null;
@@ -74,16 +82,18 @@ function parseArgs(argv: string[]): Options | null {
   const outDir = positional[0];
   if (outDir === undefined) return null;
   if (!Number.isFinite(delayMs) || delayMs < 0) return null;
-  return { outDir, origin, limit, delayMs, dryRun };
+  if (!Number.isInteger(concurrency) || concurrency <= 0) return null;
+  return { outDir, origin, limit, delayMs, concurrency, dryRun };
 }
 
 function usage(): void {
-  console.error("用法: fetch-assets.ts <outDir> [--limit N] [--delay ms] [--dry-run] [--base <origin>]");
+  console.error("用法: fetch-assets.ts <outDir> [--limit N] [--delay ms] [-c/--concurrency N] [--dry-run] [--base <origin>]");
   console.error("");
-  console.error("  --limit N    最多新抓 N 个文件（先用小值验证）");
-  console.error("  --delay ms   每次请求间隔，默认 50");
-  console.error("  --dry-run    只算依赖图，不写盘");
-  console.error("  --base URL   资源站源，默认 https://zcode.z.ai");
+  console.error("  --limit N         最多新抓 N 个文件（先用小值验证）");
+  console.error("  --delay ms        每次请求间隔，默认 0");
+  console.error("  -c, --concurrency 并发抓取数，默认 8");
+  console.error("  --dry-run         只算依赖图，不写盘");
+  console.error("  --base URL        资源站源，默认 https://zcode.z.ai");
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -111,13 +121,14 @@ async function main(): Promise<number> {
     usage();
     return 2;
   }
-  const { outDir, origin, limit, delayMs, dryRun } = options;
+  const { outDir, origin, limit, delayMs, concurrency, dryRun } = options;
 
   const assetsDir = join(outDir, "assets");
   await mkdir(assetsDir, { recursive: true });
 
   console.log(`源站      ${origin}`);
   console.log(`输出      ${outDir}`);
+  console.log(`并发      ${String(concurrency)} 线程`);
   console.log(`限速      ${String(delayMs)}ms/请求`);
   console.log(`上限      ${Number.isFinite(limit) ? String(limit) : "不限"}`);
   if (dryRun) console.log("模式      仅计算依赖图（不写盘）");
@@ -135,79 +146,128 @@ async function main(): Promise<number> {
   if (!dryRun) await writeFile(join(outDir, "index.html"), shellHtml, "utf8");
   console.log(`[shell] 已保存 index.html（${String(Buffer.byteLength(shellHtml))} 字节）`);
 
-  // ---- 2. 依赖图 ----
+  // ---- 2. 依赖图（并发工作池） ----
   const fetched: Fetched[] = [];
   const missing: string[] = [];
   const queue: string[] = [];
   const seen = new Set<string>();
 
-  for (const ref of extractRefs(shellHtml, "html")) queue.push(ref);
+  for (const ref of extractRefs(shellHtml, "html")) {
+    queue.push(ref);
+    seen.add(ref);
+  }
   console.log(`[graph] 外壳引用 ${String(queue.length)} 个资源`);
 
   let requests = 0;
-  while (queue.length > 0) {
-    const name = queue.shift();
-    if (name === undefined || seen.has(name)) continue;
-    seen.add(name);
+  let activeWorkers = 0;
+  let limitReached = false;
 
-    const targetPath = join(assetsDir, name);
-    const kind: AssetKind = kindOf(name);
+  type Resolver = () => void;
+  let waiter: Resolver | null = null;
 
-    // 已存在则跳过（可断点续抓）
-    let content: string | null = null;
-    let bytes = 0;
-    let hash = "";
+  const enqueue = (newRefs: Iterable<string>): void => {
+    for (const ref of newRefs) {
+      if (!seen.has(ref)) {
+        seen.add(ref);
+        queue.push(ref);
+      }
+    }
+    if (waiter !== null && queue.length > 0) {
+      const wake = waiter;
+      waiter = null;
+      wake();
+    }
+  };
 
-    if (!dryRun && (await exists(targetPath))) {
-      const buf = await readFile(targetPath);
-      content = buf.toString("utf8");
-      bytes = buf.length;
-      hash = sha256(buf);
-      console.log(`[skip] (${String(fetched.length + 1)}) ${name} [已存在, ${String(bytes)}B, 队列:${String(queue.length)}]`);
-    } else if (!dryRun && requests >= limit) {
-      // 达到本次上限，直接结束（seen 里的仍未抓）
-      queue.unshift(name);
-      seen.delete(name);
-      break;
-    } else {
-      const url = `${origin}${ASSET_URL_PREFIX}${name}`;
-      requests += 1;
-      await sleep(delayMs);
-      try {
-        const response = await fetch(url);
-        if (!response.ok) {
-          missing.push(name);
-          console.log(`[miss] (${String(fetched.length + 1)}) ${name} HTTP ${String(response.status)}`);
-          continue;
+  const worker = async (workerId: number): Promise<void> => {
+    while (!limitReached) {
+      if (queue.length === 0) {
+        if (activeWorkers === 0) {
+          // 所有 worker 都处于空闲状态且队列为空，抓取彻底完成
+          if (waiter !== null) {
+            const wake = waiter;
+            waiter = null;
+            wake();
+          }
+          break;
         }
-        const type = response.headers.get("content-type") ?? "";
-        // 该站对未知路径做 SPA fallback：.js/.css 却拿到 HTML 即是缺失
-        if (kind !== "html" && type.startsWith("text/html")) {
-          missing.push(name);
-          console.log(`[miss] (${String(fetched.length + 1)}) ${name} 返回外壳（SPA fallback）`);
-          continue;
-        }
-        const buf = Buffer.from(await response.arrayBuffer());
+        // 还有其他 worker 在运行，可能有新引用产出，等待唤醒
+        await new Promise<void>((resolve) => {
+          waiter = resolve;
+        });
+        continue;
+      }
+
+      const name = queue.shift();
+      if (name === undefined) continue;
+
+      const targetPath = join(assetsDir, name);
+      const kind: AssetKind = kindOf(name);
+
+      let content: string | null = null;
+      let bytes = 0;
+      let hash = "";
+
+      if (!dryRun && (await exists(targetPath))) {
+        const buf = await readFile(targetPath);
         content = buf.toString("utf8");
         bytes = buf.length;
         hash = sha256(buf);
-        if (!dryRun) await writeFile(targetPath, buf);
-        console.log(`[get ] (${String(fetched.length + 1)}) ${name} [${String(bytes)}B, 队列:${String(queue.length)}]`);
-      } catch (err) {
-        missing.push(name);
-        const message = err instanceof Error ? err.message : String(err);
-        console.log(`[err ] (${String(fetched.length + 1)}) ${name} ${message}`);
-        continue;
+        console.log(`[skip] (${String(fetched.length + 1)}) [W${workerId}] ${name} [已存在, ${String(bytes)}B, 队列:${String(queue.length)}]`);
+      } else if (!dryRun && requests >= limit) {
+        limitReached = true;
+        queue.unshift(name);
+        if (waiter !== null) {
+          const wake = waiter;
+          waiter = null;
+          wake();
+        }
+        break;
+      } else {
+        const url = `${origin}${ASSET_URL_PREFIX}${name}`;
+        requests += 1;
+        activeWorkers += 1;
+        if (delayMs > 0) await sleep(delayMs);
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            missing.push(name);
+            console.log(`[miss] (${String(fetched.length + 1)}) [W${workerId}] ${name} HTTP ${String(response.status)}`);
+            activeWorkers -= 1;
+            continue;
+          }
+          const type = response.headers.get("content-type") ?? "";
+          if (kind !== "html" && type.startsWith("text/html")) {
+            missing.push(name);
+            console.log(`[miss] (${String(fetched.length + 1)}) [W${workerId}] ${name} 返回外壳（SPA fallback）`);
+            activeWorkers -= 1;
+            continue;
+          }
+          const buf = Buffer.from(await response.arrayBuffer());
+          content = buf.toString("utf8");
+          bytes = buf.length;
+          hash = sha256(buf);
+          if (!dryRun) await writeFile(targetPath, buf);
+          console.log(`[get ] (${String(fetched.length + 1)}) [W${workerId}] ${name} [${String(bytes)}B, 队列:${String(queue.length)}]`);
+        } catch (err) {
+          missing.push(name);
+          const message = err instanceof Error ? err.message : String(err);
+          console.log(`[err ] (${String(fetched.length + 1)}) [W${workerId}] ${name} ${message}`);
+          activeWorkers -= 1;
+          continue;
+        }
+        activeWorkers -= 1;
+      }
+
+      if (content !== null) {
+        fetched.push({ name, bytes, sha256: hash });
+        enqueue(extractRefs(content, kind));
       }
     }
+  };
 
-    if (content === null) continue;
-    fetched.push({ name, bytes, sha256: hash });
-
-    for (const ref of extractRefs(content, kind)) {
-      if (!seen.has(ref)) queue.push(ref);
-    }
-  }
+  const workers = Array.from({ length: concurrency }, (_, i) => worker(i + 1));
+  await Promise.all(workers);
 
   // ---- 3. 报告 ----
   console.log("");
