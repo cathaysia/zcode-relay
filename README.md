@@ -43,23 +43,26 @@
 和 relay 放进**同一进程、同一端口**（`src/serve/main.ts`），所以只需一张证书、
 一个端口。完整部署步骤见 [docs/deploy.md](docs/deploy.md)。
 
-一键启动（自动按需抓取资源并启动服务；macOS 下同时带环境唤起桌面端）：
+### 常用命令工作流
 
 ```sh
+# 1. 单机一键跑起全流程（自动启动 Relay + Tailscale 官方 HTTPS 反代 + 自动唤起 ZCode）
 just up
-# 或指定网络参数：
-# just up 10.8.0.1 18899 ./vendor-assets https://zcode.internal
+
+# 2. 跨机器场景：在服务端（如 Linux / 云主机）仅启动 Relay 服务 + 反代
+just serve
+
+# 3. 跨机器场景：在桌面客户端仅启动 ZCode（支持传入远端 Relay 域名/IP）
+just zcode https://<device>.<tailnet>.ts.net
+
+# 4. 销毁与重置（清理下载的 SPA 镜像、重置 tailscale serve 反代配置）
+just destroy
 ```
 
-如果使用 `just serve`，当检测到未抓取静态资源时也会**自动先抓取再启动**。
-
-三条底层命令（细粒度控制）：
-
-```sh
-just fetch-assets ./vendor-assets             # 抓资源（只读，不改写任何文件）
-just serve 10.8.0.1 18899 ./vendor-assets https://zcode.internal
-# 启动服务（同端口托管 SPA 与 Relay WebSocket）
-```
+- `serve`：同端口提供 SPA 静态资源与 WebSocket relay，若本地有 Tailscale 则自动配置 `tailscale serve` 官方 HTTPS 反代（免自签证书风险）。若静态资源目录未初始化，会自动多线程并发抓取。
+- `zcode [origin]`：自动注入 `ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL` 与 `ZCODE_WEB_REMOTE_CONTROL_URL` 并启动桌面端，支持 macOS 和 Linux。
+- `up`：`serve` 与 `zcode` 的一键编排启动。
+- `destroy`：销毁已抓取的 vendor assets 缓存与重置 Tailscale 反代。
 
 `serve` 会在启动前完成预检并把 relay patch 套在**内存 overlay** 上——磁盘上的
 厂商资源始终是原始镜像，`manifest.json` 的 sha256 始终可校验。**预检不通过时
