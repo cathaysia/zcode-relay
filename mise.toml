@@ -1,2 +1,5 @@
 [tools]
+# Node 必须 >=24：TypeScript 直接跑在原生类型擦除上，无构建步骤（见 AGENTS.md）。
+node = "24"
+just = "latest"
 caddy = "latest"
