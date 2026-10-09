@@ -22,6 +22,7 @@
 
 import { createReadStream } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
+import { pipeline } from "node:stream";
 import { join, normalize, resolve, sep, extname } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -369,14 +370,14 @@ export class AssetServer {
       res.end();
       return;
     }
+    // 必须用 pipeline 而不是 pipe：客户端中途断开时 pipe 只会把源流 unpipe 并暂停，
+    // 既不会 destroy 源流，也不会触发 autoClose，于是那个文件 fd 被永久持有
+    // （实测每个中断请求泄漏一个，约两百次后 EMFILE）。pipeline 在任意一端
+    // 结束或出错时销毁全部流，这才是核心模块里本来就有的正确原语。
     await new Promise<void>((done) => {
-      const stream = createReadStream(absolute);
-      stream.on("error", () => {
-        res.destroy();
+      pipeline(createReadStream(absolute), res, () => {
         done();
       });
-      stream.on("end", done);
-      stream.pipe(res);
     });
   }
 
