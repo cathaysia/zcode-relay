@@ -40,11 +40,14 @@ up host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="" app="true":
         echo "==> 检测到资源目录 {{assetsdir}} 未抓取，开始自动抓取 SPA 静态资源..."
         node src/tools/fetch-assets.ts {{assetsdir}}
     fi
-    export ZCODE_RELAY_HOST={{host}}
-    export ZCODE_RELAY_PORT={{port}}
-    export ZCODE_ASSETS_DIR={{assetsdir}}
-    export ZCODE_PUBLIC_ORIGIN={{origin}}
-    DERIVED_ORIGIN="${origin:-http://${host}:${port}}"
+    export ZCODE_RELAY_HOST="{{host}}"
+    export ZCODE_RELAY_PORT="{{port}}"
+    export ZCODE_ASSETS_DIR="{{assetsdir}}"
+    export ZCODE_PUBLIC_ORIGIN="{{origin}}"
+    DERIVED_ORIGIN="{{origin}}"
+    if [ -z "${DERIVED_ORIGIN}" ]; then
+        DERIVED_ORIGIN="http://{{host}}:{{port}}"
+    fi
     RELAY_WS="${DERIVED_ORIGIN/http/ws}/ws"
     if [ "{{app}}" = "true" ] && [ "$(uname)" = "Darwin" ] && [ -d "/Applications/ZCode.app" ]; then
         (
