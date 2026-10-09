@@ -301,6 +301,23 @@ test("反向转发同样逐字节", () => {
   assert.deepEqual(device.conn.sent, [raw]);
 });
 
+test("接近帧上限的大帧逐字节转发（走头部扫描快路径）", () => {
+  const core = newCore();
+  const device = connectDevice(core, PASS_HASH);
+  const terminal = connectTerminal(core, PASS_HASH, device.sid);
+  device.conn.clear();
+  terminal.conn.clear();
+
+  // 大帧走的是只扫描头部、不解析 payload 的快路径，因此这里专门钉住
+  // 「原文一字不改」这条不变式（design.md §3 不变式 1、protocol.md §10.14）。
+  const raw = `{"type":"data","payload":{"zcode_type":"rpc-frame","dataBase64":"${"A".repeat(
+    512 * 1024,
+  )}"},"client_ts":1234}`;
+  core.handleMessage(device.conn, raw);
+
+  assert.deepEqual(terminal.conn.sent, [raw], "大帧必须逐字节相同");
+});
+
 test("未配对时不转发 data", () => {
   const core = newCore();
   const device = connectDevice(core, PASS_HASH);

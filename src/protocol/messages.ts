@@ -3,7 +3,12 @@
  *
  * 设计要点：`data` 消息只读取信封的 `type`，保留**原始文本**用于转发。
  * 重组 JSON 会改变键序与数字格式，虽多半无害但无收益，故一律原样转发。
- * 这也满足协议要求"relay 不解析 payload"。
+ * 这也满足协议要求"relay 不解析 payload"（§10.14 与 design.md §3 不变式 1）。
+ *
+ * 派发只依赖 `type` 这一个字段，所以先用**有界头部扫描**取它：大帧的 payload
+ * 可达 1 MiB，为读一个字段而 JSON.parse 整条报文是把 payload 解析了一遍，
+ * 既违背上面的不变式，实测也占每帧成本的 65%–77%。扫描不命中时回退完整解析，
+ * 因此对字段顺序异常的报文语义不变。
  */
 
 import type { AuthRole, PairStatus, RelayErrorCode } from "./limits.ts";
@@ -51,12 +56,31 @@ function parseMeta(v: unknown): PeerMeta {
 }
 
 /**
+ * 信封头部的 `type` 字段。§6.7 的记法把它写在最前，但那是 schema 记法，
+ * 两侧实际的序列化键序尚未实测（见 protocol.md §13 未知项 11）。故这里
+ * **不依赖键序**：扫不到就回退完整解析，键序异常只是慢，不会错。
+ */
+const TYPE_HEAD_PATTERN = /^\s*\{\s*"type"\s*:\s*"([^"]*)"/;
+
+/** 头部扫描的窗口大小。足以覆盖信封开头，且对上 MiB 级报文是常数开销。 */
+const HEAD_SCAN_CHARS = 256;
+
+/**
  * 解析一条入站消息。返回 null 表示格式非法，调用方应丢弃（不断连）。
  *
  * 仅严格校验 control 消息的信封字段；`data` 只认 `type`，其余原样保留。
  */
 export function parseInbound(raw: string): Inbound | null {
   if (Buffer.byteLength(raw, "utf8") > MAX_PHYSICAL_FRAME_BYTES) return null;
+
+  // 快路径：头部扫描认出 data 就直接放行，绝不触碰 payload。
+  // 注意这里是有意不做整体合法性校验的——payload 是 base64 分片，其合法性由
+  // 接收端逐条严格校验（§4.4），relay 只做字节管道。命中该路径的报文按原始
+  // 文本逐字节转发。
+  const head = TYPE_HEAD_PATTERN.exec(
+    raw.length > HEAD_SCAN_CHARS ? raw.slice(0, HEAD_SCAN_CHARS) : raw,
+  );
+  if (head !== null && head[1] === "data") return { type: "data", raw };
 
   let parsed: unknown;
   try {

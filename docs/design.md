@@ -87,6 +87,8 @@ Web 端 relay 地址硬编码（`overrideUrl: void 0`），因此"终端如何�
 关键不变式：
 
 1. **relay 不解析 `payload`**。`rpc-frame` 含桥接身份三元组（`bridgeSessionId`/`bridgeGeneration`/`recoveryId`），改写任一项都会使客户端降级、桥接失效。可在 `{type:"data"}` 外层附加 `server_ts`，但不得改动 `payload` 内部。
+
+   落实方式：派发只需信封的 `type` 一个字段，故 `parseInbound` 先用 256 字符的**有界头部扫描**取它；认出 `data` 就直接把原文交出去，绝不 `JSON.parse` 整条报文。大帧的 payload 可达 1 MiB，完整解析既违背本条不变式，实测也占每帧成本的 65%–77%（去掉后 64 KiB 帧的转发成本从 26 µs 降到 8 µs）。扫描不命中时回退完整解析，所以字段顺序异常的报文只是慢，不会错。
 2. **逐连接 FIFO 保序，不合并不拆分**。分片按 `seq` 连续校验，乱序或缺帧触发终端硬故障。
 3. **`matched` 必须向双方广播，且设备重连后必须重发**。设备侧把重连后收到的 `waiting` 判为陈旧，会自行触发重连。
 4. **`error.code` 只用协议定义的五个**。两侧把未知 code 视为致命且不重连。

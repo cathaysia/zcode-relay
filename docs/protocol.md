@@ -321,6 +321,7 @@ relay 必须**逐字节原样转发**。成员均为 `.strict()`，增删字段�
 | 角色不匹配的 proof | 必须拒绝（`AUTH_FAILED`）。proof 与角色字符串绑定，诚实客户端不会误匹配 |
 | 同 socket 重复 `auth_init` | **UNKNOWN**。客户端无去重；第二次挑战会触发第二次 `auth_response`，而重复的 `auth_ack` 幂等无害 |
 | 超限入站消息 | 必须避免；双方都会降级桥接 |
+| 信封头部可识别为 `data`、但整体不是合法 JSON | relay **原样转发**。§10.14 要求不解析 `payload`，故 relay 只扫信封头部的 `type`，不校验整体合法性；接收端本就会逐条严格校验并丢弃非法载荷，因此这类报文在下一跳被丢弃 |
 | 乱序 / 重复分片 | 内容相同的重复 ⇒ 容忍（重 ack）；乱序 ⇒ 终端硬故障；冲突 ⇒ `conflictingDuplicate`/`checksumMismatch`。净效果是桥接永久降级，直到终端重新打开 |
 | 缺失 ack | 发送方最多保留 8 MiB / 45 秒未确认数据，超限即降级 |
 | relay 在配对前断开终端 | 终端**完全不重试**（`hadPairedSession===false`）。relay 不得丢弃首次连接的终端 socket |
@@ -359,3 +360,4 @@ SPA 中还存在一套**基于 token 的 HTTP + window-control WS** 客户端（
 8. relay 侧限额（最大会话数、速率），以及 `mid` 是否对路由有权威性（客户端每条路由消息都带 `device_sid`，故 `device_sid` 是唯一严格必需的键）。
 9. §12 中 window-control 桥接 socket 的 `wsUrl` 形态与可达性。
 10. §9 的定时器是否会被运行时覆盖——在抽取到的构建中，manager 构造两个 transport 时**未传**任何定时器选项，故 §9 的默认值即实际生效值。
+11. 两侧序列化 `data` 信封时的**键序**。§6.7 把 `type` 写在最前，但那只是 schema 记法，不构成序列化顺序的证据（`verification.md` 未记录该项）。relay 的派发因此不依赖键序：`parseInbound` 的头部扫描不命中时会回退完整解析，键序异常只影响性能、不影响语义。若日后用 `echo-relay` 抓到真实报文的键序，应在此记录并同步更新实现注释。
