@@ -163,6 +163,7 @@ async function main(): Promise<number> {
       content = buf.toString("utf8");
       bytes = buf.length;
       hash = sha256(buf);
+      console.log(`[skip] (${String(fetched.length + 1)}) ${name} [已存在, ${String(bytes)}B, 队列:${String(queue.length)}]`);
     } else if (!dryRun && requests >= limit) {
       // 达到本次上限，直接结束（seen 里的仍未抓）
       queue.unshift(name);
@@ -176,14 +177,14 @@ async function main(): Promise<number> {
         const response = await fetch(url);
         if (!response.ok) {
           missing.push(name);
-          console.log(`[miss] ${name} HTTP ${String(response.status)}`);
+          console.log(`[miss] (${String(fetched.length + 1)}) ${name} HTTP ${String(response.status)}`);
           continue;
         }
         const type = response.headers.get("content-type") ?? "";
         // 该站对未知路径做 SPA fallback：.js/.css 却拿到 HTML 即是缺失
         if (kind !== "html" && type.startsWith("text/html")) {
           missing.push(name);
-          console.log(`[miss] ${name} 返回外壳（SPA fallback）`);
+          console.log(`[miss] (${String(fetched.length + 1)}) ${name} 返回外壳（SPA fallback）`);
           continue;
         }
         const buf = Buffer.from(await response.arrayBuffer());
@@ -191,13 +192,11 @@ async function main(): Promise<number> {
         bytes = buf.length;
         hash = sha256(buf);
         if (!dryRun) await writeFile(targetPath, buf);
-        if (fetched.length % 100 === 0) {
-          console.log(`[get ] ${String(fetched.length)} 个已抓，队列 ${String(queue.length)}`);
-        }
+        console.log(`[get ] (${String(fetched.length + 1)}) ${name} [${String(bytes)}B, 队列:${String(queue.length)}]`);
       } catch (err) {
         missing.push(name);
         const message = err instanceof Error ? err.message : String(err);
-        console.log(`[err ] ${name} ${message}`);
+        console.log(`[err ] (${String(fetched.length + 1)}) ${name} ${message}`);
         continue;
       }
     }
