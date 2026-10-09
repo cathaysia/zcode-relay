@@ -32,8 +32,8 @@ patch-apply input output:
 fetch-assets outdir *args:
     node src/tools/fetch-assets.ts {{outdir}} {{args}}
 
-# 启动服务并自动在资源缺失时抓取；自动启动 Caddy HTTPS 自签名反代，在 macOS 下联动打开桌面端
-up host="127.0.0.1" port="18899" https_port="8443" assetsdir="vendor-assets" origin="" app="true":
+# 启动服务并自动在资源缺失时抓取；通过 Tailscale Serve 开启官方合规 HTTPS 反代（免自签证书告警）
+up host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="" app="true":
     #!/usr/bin/env bash
     set -euo pipefail
     if [ ! -f "{{assetsdir}}/index.html" ]; then
@@ -41,27 +41,30 @@ up host="127.0.0.1" port="18899" https_port="8443" assetsdir="vendor-assets" ori
         node src/tools/fetch-assets.ts {{assetsdir}}
     fi
 
-    # 自动获取本机 IP（优先 Tailscale IP，其次局域网 IP 或 localhost）
-    TS_IP="$(tailscale ip -4 2>/dev/null || true)"
-    PUBLIC_HOST="${TS_IP:-127.0.0.1}"
-
     DERIVED_ORIGIN="{{origin}}"
+    USE_TS_SERVE=0
+
     if [ -z "${DERIVED_ORIGIN}" ]; then
-        DERIVED_ORIGIN="https://${PUBLIC_HOST}:{{https_port}}"
+        # 尝试使用 Tailscale MagicDNS 官方完整域名
+        TS_STATUS="$(tailscale status --json 2>/dev/null || true)"
+        TS_DNS="$(echo "${TS_STATUS}" | grep -m1 '"MagicDNSSuffix"' | sed -E 's/.*"MagicDNSSuffix": *"([^"]+)".*/\1/' || true)"
+        TS_SELF="$(echo "${TS_STATUS}" | grep -m1 '"Self"' -A 5 | grep '"DNSName"' | sed -E 's/.*"DNSName": *"([^"]+)".*/\1/' | sed 's/\.$//' || true)"
+
+        if [ -n "${TS_SELF}" ]; then
+            DERIVED_ORIGIN="https://${TS_SELF}"
+            USE_TS_SERVE=1
+        elif [ -n "${TS_DNS}" ]; then
+            DERIVED_ORIGIN="https://$(hostname -s | tr '[:upper:]' '[:lower:]').${TS_DNS}"
+            USE_TS_SERVE=1
+        else
+            DERIVED_ORIGIN="http://{{host}}:{{port}}"
+        fi
     fi
 
-    # 动态生成 Caddyfile（若端口或 IP 变动）
-    printf "{\n    admin off\n}\n\n%%s, https://localhost:{{https_port}} {\n    tls internal\n    reverse_proxy 127.0.0.1:{{port}}\n}\n" "${DERIVED_ORIGIN}" > Caddyfile
-
-    # 启动 Caddy 作为后台反向代理
-    if command -v mise >/dev/null 2>&1; then
-        mise exec -- caddy stop >/dev/null 2>&1 || true
-        mise exec -- caddy start >/dev/null 2>&1
-        echo "==> Caddy HTTPS 反向代理已启动: ${DERIVED_ORIGIN} -> 127.0.0.1:{{port}}"
-    elif command -v caddy >/dev/null 2>&1; then
-        caddy stop >/dev/null 2>&1 || true
-        caddy start >/dev/null 2>&1
-        echo "==> Caddy HTTPS 反向代理已启动: ${DERIVED_ORIGIN} -> 127.0.0.1:{{port}}"
+    # 如果走 Tailscale 域名，直接利用 tailscale serve 提供合规官方 HTTPS 反向代理（零证书警告）
+    if [ "${USE_TS_SERVE}" = "1" ] && command -v tailscale >/dev/null 2>&1; then
+        echo "==> 启动 Tailscale Serve 官方合规 HTTPS 反向代理: ${DERIVED_ORIGIN} -> 127.0.0.1:{{port}}"
+        tailscale serve --bg {{port}} >/dev/null 2>&1 || true
     fi
 
     export ZCODE_RELAY_HOST="{{host}}"
@@ -69,7 +72,7 @@ up host="127.0.0.1" port="18899" https_port="8443" assetsdir="vendor-assets" ori
     export ZCODE_ASSETS_DIR="{{assetsdir}}"
     export ZCODE_PUBLIC_ORIGIN="${DERIVED_ORIGIN}"
 
-    RELAY_WS="${DERIVED_ORIGIN/https/wss}/ws"
+    RELAY_WS="${DERIVED_ORIGIN/http/ws}/ws"
     if [ "{{app}}" = "true" ] && [ "$(uname)" = "Darwin" ] && [ -d "/Applications/ZCode.app" ]; then
         (
             sleep 1
@@ -81,10 +84,8 @@ up host="127.0.0.1" port="18899" https_port="8443" assetsdir="vendor-assets" ori
     fi
 
     cleanup() {
-        if command -v mise >/dev/null 2>&1; then
-            mise exec -- caddy stop >/dev/null 2>&1 || true
-        elif command -v caddy >/dev/null 2>&1; then
-            caddy stop >/dev/null 2>&1 || true
+        if [ "${USE_TS_SERVE}" = "1" ] && command -v tailscale >/dev/null 2>&1; then
+            tailscale serve reset >/dev/null 2>&1 || true
         fi
     }
     trap cleanup EXIT INT TERM
