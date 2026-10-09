@@ -17,12 +17,13 @@
  *   ZCODE_ECHO_SHOW_SECRETS=1  显示 pass_hash / proof 的实际值（默认脱敏）
  */
 
-import { RelayServer } from "../relay/server.ts";
+import { startRelayServer } from "../relay/server.ts";
 import type { FrameTap } from "../relay/conn.ts";
 import type { Logger } from "../relay/relay.ts";
 import { getPlatformConfigGuide } from "../platform.ts";
+import { utf8ByteLength } from "../protocol/messages.ts";
 
-const SHOW_SECRETS = process.env["ZCODE_ECHO_SHOW_SECRETS"] === "1";
+const SHOW_SECRETS = Deno.env.get("ZCODE_ECHO_SHOW_SECRETS") === "1";
 
 function ts(): string {
   return new Date().toISOString().slice(11, 23);
@@ -39,44 +40,43 @@ function summarize(text: string): string {
   try {
     parsed = JSON.parse(text);
   } catch {
-    return `非 JSON（${Buffer.byteLength(text, "utf8")} 字节）`;
+    return `非 JSON（${String(utf8ByteLength(text))} 字节）`;
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return "非对象 JSON";
   }
   const m = parsed as Record<string, unknown>;
   const type = typeof m["type"] === "string" ? m["type"] : "(缺 type)";
-  const bytes = Buffer.byteLength(text, "utf8");
+  const bytes = utf8ByteLength(text);
 
   switch (type) {
     case "device_register_init":
       return (
         `device_register_init  device_mid=${String(m["device_mid"])} ` +
         `pass_hash=${redact(String(m["pass_hash"]))} meta=${JSON.stringify(m["meta"])} ` +
-        `[${bytes}B]`
+        `[${String(bytes)}B]`
       );
     case "auth_init":
       return (
         `auth_init  role=${String(m["role"])} device_sid=${String(m["device_sid"])} ` +
-        `meta=${JSON.stringify(m["meta"])} [${bytes}B]`
+        `meta=${JSON.stringify(m["meta"])} [${String(bytes)}B]`
       );
     case "auth_response":
       return (
         `auth_response  device_sid=${String(m["device_sid"])} ` +
-        `proof=${redact(String(m["proof"]))} [${bytes}B]`
+        `proof=${redact(String(m["proof"]))} [${String(bytes)}B]`
       );
     case "pair_status_query":
-      return `pair_status_query  device_sid=${String(m["device_sid"])} [${bytes}B]`;
+      return `pair_status_query  device_sid=${String(m["device_sid"])} [${String(bytes)}B]`;
     case "data": {
       const payload = m["payload"];
-      const zcodeType =
-        typeof payload === "object" && payload !== null && !Array.isArray(payload)
-          ? String((payload as Record<string, unknown>)["zcode_type"])
-          : "?";
-      return `data  zcode_type=${zcodeType} [${bytes}B]`;
+      const zcodeType = typeof payload === "object" && payload !== null && !Array.isArray(payload)
+        ? String((payload as Record<string, unknown>)["zcode_type"])
+        : "?";
+      return `data  zcode_type=${zcodeType} [${String(bytes)}B]`;
     }
     default:
-      return `${type} [${bytes}B]`;
+      return `${type} [${String(bytes)}B]`;
   }
 }
 
@@ -102,7 +102,9 @@ const logger: Logger = {
       sawRegister = true;
       console.log(`\n${ts()}  [注册] 设备已注册`);
       console.log(`         device_mid = ${String(fields?.["mid"])}`);
-      console.log(`         platform   = ${String(fields?.["platform"])} ${String(fields?.["version"])}`);
+      console.log(
+        `         platform   = ${String(fields?.["platform"])} ${String(fields?.["version"])}`,
+      );
       console.log("         已捕获 pass_hash，将用它校验后续 proof\n");
       return;
     }
@@ -137,14 +139,16 @@ const logger: Logger = {
   },
 };
 
-const host = process.env["ZCODE_RELAY_HOST"]?.trim() ?? "127.0.0.1";
-const port = Number(process.env["ZCODE_RELAY_PORT"]?.trim() ?? "18899");
-const path = process.env["ZCODE_RELAY_PATH"]?.trim() ?? "/ws";
+const host = Deno.env.get("ZCODE_RELAY_HOST")?.trim() ?? "127.0.0.1";
+const port = Number(Deno.env.get("ZCODE_RELAY_PORT")?.trim() ?? "18899");
+const path = Deno.env.get("ZCODE_RELAY_PATH")?.trim() ?? "/ws";
 
-const server = new RelayServer({ host, port, path, logger, tap });
-const address = await server.listen();
+const server = await startRelayServer({ host, port, path, logger, tap });
+const { address } = server;
 
-const wsFullUrl = `ws://${address.address === "0.0.0.0" ? "127.0.0.1" : address.address}:${address.port}${path}`;
+const wsFullUrl = `ws://${
+  address.address === "0.0.0.0" ? "127.0.0.1" : address.address
+}:${address.port}${path}`;
 const echoGuide = getPlatformConfigGuide({
   relayUrl: wsFullUrl,
   derivedOrigin: `http://127.0.0.1:${address.port}`,
@@ -170,21 +174,20 @@ const report = (): void => {
   console.log("=".repeat(78));
   console.log("汇总");
   console.log("=".repeat(78));
-  console.log(`入站报文 ${inboundCount} 条，出站报文 ${outboundCount} 条`);
+  console.log(`入站报文 ${String(inboundCount)} 条，出站报文 ${String(outboundCount)} 条`);
   console.log(`是否观察到设备注册: ${sawRegister ? "是" : "否"}`);
-  const verdictText =
-    authVerdict === "ok"
-      ? "通过 —— 协议实现与真实客户端一致"
-      : authVerdict === "failed"
-        ? "失败 —— 协议存在偏差"
-        : "未完成（未观察到成功的认证）";
+  const verdictText = authVerdict === "ok"
+    ? "通过 —— 协议实现与真实客户端一致"
+    : authVerdict === "failed"
+    ? "失败 —— 协议存在偏差"
+    : "未完成（未观察到成功的认证）";
   console.log(`协议验证: ${verdictText}`);
   console.log("=".repeat(78));
 };
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
+  Deno.addSignalListener(signal, () => {
     report();
-    void server.close().then(() => process.exit(0));
+    void server.close().then(() => Deno.exit(0));
   });
 }

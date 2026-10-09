@@ -20,6 +20,11 @@ export class FakeConn implements Conn {
     this.id = `${label}-${counter}`;
   }
 
+  /** 与 WsConn 同义：close() 之前一直可写。 */
+  get isOpen(): boolean {
+    return !this.closed;
+  }
+
   sendRaw(text: string): void {
     this.sent.push(text);
   }

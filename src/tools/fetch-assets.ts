@@ -2,9 +2,9 @@
  * SPA 资源抓取。流程见 docs/patching.md §4。
  *
  * 用法：
- *   node src/tools/fetch-assets.ts <outDir> [--limit N] [--delay ms] [--dry-run]
+ *   deno task fetch-assets <outDir> [--limit N] [--delay ms] [--dry-run]
  *
- * 默认串行且每次请求间隔 50ms。完整抓取约 2000+ 个文件（其中约 370 个是
+ * 默认并发 8、不限速。完整抓取约 2000+ 个文件（其中约 370 个是
  * 不在 __vite__mapDeps 里的动态 import 目标），因此先用 --limit 小批量验证
  * 再全量抓取。
  *
@@ -15,21 +15,19 @@
  * 见 src/serve/main.ts。
  */
 
-import { mkdir, writeFile, readFile, access } from "node:fs/promises";
-import { createHash } from "node:crypto";
-import { join } from "node:path";
+import * as posix from "@std/path/posix";
 
-import {
-  ASSET_URL_PREFIX,
-  extractRefs,
-  kindOf,
-  type AssetKind,
-} from "./asset-graph.ts";
+import { ASSET_URL_PREFIX, type AssetKind, extractRefs, kindOf } from "./asset-graph.ts";
 import { inspectAnchors } from "./patch-spa.ts";
+import { sha256Hex } from "./digest.ts";
+import { utf8ByteLength } from "../protocol/messages.ts";
 
 const DEFAULT_ORIGIN = "https://zcode.z.ai";
 const DEFAULT_DELAY_MS = 0;
 const DEFAULT_CONCURRENCY = 8;
+
+const UTF8 = new TextEncoder();
+const UTF8_DECODER = new TextDecoder("utf-8");
 
 interface Options {
   readonly outDir: string;
@@ -87,7 +85,9 @@ function parseArgs(argv: string[]): Options | null {
 }
 
 function usage(): void {
-  console.error("用法: fetch-assets.ts <outDir> [--limit N] [--delay ms] [-c/--concurrency N] [--dry-run] [--base <origin>]");
+  console.error(
+    "用法: fetch-assets.ts <outDir> [--limit N] [--delay ms] [-c/--concurrency N] [--dry-run] [--base <origin>]",
+  );
   console.error("");
   console.error("  --limit N         最多新抓 N 个文件（先用小值验证）");
   console.error("  --delay ms        每次请求间隔，默认 0");
@@ -98,11 +98,9 @@ function usage(): void {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-const sha256 = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
-
 async function exists(path: string): Promise<boolean> {
   try {
-    await access(path);
+    await Deno.stat(path);
     return true;
   } catch {
     return false;
@@ -116,15 +114,15 @@ interface Fetched {
 }
 
 async function main(): Promise<number> {
-  const options = parseArgs(process.argv.slice(2));
+  const options = parseArgs(Deno.args);
   if (options === null) {
     usage();
     return 2;
   }
   const { outDir, origin, limit, delayMs, concurrency, dryRun } = options;
 
-  const assetsDir = join(outDir, "assets");
-  await mkdir(assetsDir, { recursive: true });
+  const assetsDir = posix.join(outDir, "assets");
+  await Deno.mkdir(assetsDir, { recursive: true });
 
   console.log(`源站      ${origin}`);
   console.log(`输出      ${outDir}`);
@@ -143,8 +141,8 @@ async function main(): Promise<number> {
     return 1;
   }
   const shellHtml = await shellResponse.text();
-  if (!dryRun) await writeFile(join(outDir, "index.html"), shellHtml, "utf8");
-  console.log(`[shell] 已保存 index.html（${String(Buffer.byteLength(shellHtml))} 字节）`);
+  if (!dryRun) await Deno.writeTextFile(posix.join(outDir, "index.html"), shellHtml);
+  console.log(`[shell] 已保存 index.html（${String(utf8ByteLength(shellHtml))} 字节）`);
 
   // ---- 2. 依赖图（并发工作池） ----
   const fetched: Fetched[] = [];
@@ -201,7 +199,7 @@ async function main(): Promise<number> {
       const name = queue.shift();
       if (name === undefined) continue;
 
-      const targetPath = join(assetsDir, name);
+      const targetPath = posix.join(assetsDir, name);
       const kind: AssetKind = kindOf(name);
 
       let content: string | null = null;
@@ -209,11 +207,15 @@ async function main(): Promise<number> {
       let hash = "";
 
       if (!dryRun && (await exists(targetPath))) {
-        const buf = await readFile(targetPath);
-        content = buf.toString("utf8");
-        bytes = buf.length;
-        hash = sha256(buf);
-        console.log(`[skip] (${String(fetched.length + 1)}) [W${workerId}] ${name} [已存在, ${String(bytes)}B, 队列:${String(queue.length)}]`);
+        const buf = await Deno.readFile(targetPath);
+        content = UTF8_DECODER.decode(buf);
+        bytes = buf.byteLength;
+        hash = await sha256Hex(buf);
+        console.log(
+          `[skip] (${String(fetched.length + 1)}) [W${workerId}] ${name} [已存在, ${
+            String(bytes)
+          }B, 队列:${String(queue.length)}]`,
+        );
       } else if (!dryRun && requests >= limit) {
         limitReached = true;
         queue.unshift(name);
@@ -232,23 +234,35 @@ async function main(): Promise<number> {
           const response = await fetch(url);
           if (!response.ok) {
             missing.push(name);
-            console.log(`[miss] (${String(fetched.length + 1)}) [W${workerId}] ${name} HTTP ${String(response.status)}`);
+            console.log(
+              `[miss] (${String(fetched.length + 1)}) [W${workerId}] ${name} HTTP ${
+                String(response.status)
+              }`,
+            );
             activeWorkers -= 1;
             continue;
           }
           const type = response.headers.get("content-type") ?? "";
           if (kind !== "html" && type.startsWith("text/html")) {
             missing.push(name);
-            console.log(`[miss] (${String(fetched.length + 1)}) [W${workerId}] ${name} 返回外壳（SPA fallback）`);
+            console.log(
+              `[miss] (${
+                String(fetched.length + 1)
+              }) [W${workerId}] ${name} 返回外壳（SPA fallback）`,
+            );
             activeWorkers -= 1;
             continue;
           }
-          const buf = Buffer.from(await response.arrayBuffer());
-          content = buf.toString("utf8");
-          bytes = buf.length;
-          hash = sha256(buf);
-          if (!dryRun) await writeFile(targetPath, buf);
-          console.log(`[get ] (${String(fetched.length + 1)}) [W${workerId}] ${name} [${String(bytes)}B, 队列:${String(queue.length)}]`);
+          const buf = new Uint8Array(await response.arrayBuffer());
+          content = UTF8_DECODER.decode(buf);
+          bytes = buf.byteLength;
+          hash = await sha256Hex(buf);
+          if (!dryRun) await Deno.writeFile(targetPath, buf);
+          console.log(
+            `[get ] (${String(fetched.length + 1)}) [W${workerId}] ${name} [${
+              String(bytes)
+            }B, 队列:${String(queue.length)}]`,
+          );
         } catch (err) {
           missing.push(name);
           const message = err instanceof Error ? err.message : String(err);
@@ -293,13 +307,16 @@ async function main(): Promise<number> {
   const manifest = {
     source: origin,
     fetchedAt: new Date().toISOString(),
-    shellBytes: Buffer.byteLength(shellHtml),
-    shellSha256: sha256(Buffer.from(shellHtml, "utf8")),
+    shellBytes: utf8ByteLength(shellHtml),
+    shellSha256: await sha256Hex(UTF8.encode(shellHtml)),
     files: fetched.sort((a, b) => a.name.localeCompare(b.name)),
     missing: missing.sort(),
   };
-  await writeFile(join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
-  console.log(`清单已写出: ${join(outDir, "manifest.json")}`);
+  await Deno.writeTextFile(
+    posix.join(outDir, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  console.log(`清单已写出: ${posix.join(outDir, "manifest.json")}`);
 
   // ---- 5. 入口 bundle 的 patch 可行性检查（只读，不改写）----
   const entry = fetched.find((f) => /^index-.*\.js$/.test(f.name));
@@ -310,7 +327,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const anchors = inspectAnchors(await readFile(join(assetsDir, entry.name), "utf8"));
+  const anchors = inspectAnchors(await Deno.readTextFile(posix.join(assetsDir, entry.name)));
   console.log("");
   console.log(`入口 bundle: ${entry.name}`);
   if (anchors.patchable) {
@@ -330,4 +347,4 @@ async function main(): Promise<number> {
   return 0;
 }
 
-process.exit(await main());
+Deno.exit(await main());

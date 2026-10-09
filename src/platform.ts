@@ -14,9 +14,10 @@ export function getPlatformConfigGuide(options: {
   relayUrl: string;
   derivedOrigin: string;
   port: number;
-  platform?: NodeJS.Platform;
+  /** 默认取 `Deno.build.os`；显式传入便于测试。 */
+  platform?: string;
 }): PlatformConfigGuide {
-  const os = options.platform ?? process.platform;
+  const os = options.platform ?? Deno.build.os;
   const isMac = os === "darwin";
 
   if (isMac) {
@@ -31,7 +32,7 @@ export function getPlatformConfigGuide(options: {
       launchExample: [
         `  ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=${options.relayUrl} \\`,
         `  ZCODE_WEB_REMOTE_CONTROL_URL=${options.derivedOrigin}/remote/v4 \\`,
-        '  /Applications/ZCode.app/Contents/MacOS/ZCode',
+        "  /Applications/ZCode.app/Contents/MacOS/ZCode",
       ].join("\n"),
       portCheckCommand: `lsof -iTCP:${options.port} -sTCP:LISTEN`,
     };

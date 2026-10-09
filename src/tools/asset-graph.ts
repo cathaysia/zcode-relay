@@ -34,7 +34,9 @@ function cleanRef(ref: string): string {
 /** 是否是我们会处理的资源（跳过 data: / http: / 空串）。 */
 function isAssetName(name: string): boolean {
   if (name.length === 0) return false;
-  if (name.startsWith("data:") || name.startsWith("http:") || name.startsWith("https:")) return false;
+  if (name.startsWith("data:") || name.startsWith("http:") || name.startsWith("https:")) {
+    return false;
+  }
   if (name.startsWith("//")) return false;
   // 只取带扩展名的资源
   return /\.[A-Za-z0-9]{1,8}$/.test(name);
@@ -56,12 +58,11 @@ export function kindOf(name: string): AssetKind {
 export function extractRefs(content: string, kind: AssetKind): Set<string> {
   const found = new Set<string>();
 
-  const patterns: RegExp[] =
-    kind === "js"
-      ? [RELATIVE_REF, ABSOLUTE_REF]
-      : kind === "css"
-        ? [CSS_URL_REF, ABSOLUTE_REF]
-        : [ABSOLUTE_REF];
+  const patterns: RegExp[] = kind === "js"
+    ? [RELATIVE_REF, ABSOLUTE_REF]
+    : kind === "css"
+    ? [CSS_URL_REF, ABSOLUTE_REF]
+    : [ABSOLUTE_REF];
 
   for (const pattern of patterns) {
     pattern.lastIndex = 0;

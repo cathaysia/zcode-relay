@@ -65,13 +65,25 @@ const TYPE_HEAD_PATTERN = /^\s*\{\s*"type"\s*:\s*"([^"]*)"/;
 /** 头部扫描的窗口大小。足以覆盖信封开头，且对上 MiB 级报文是常数开销。 */
 const HEAD_SCAN_CHARS = 256;
 
+const UTF8 = new TextEncoder();
+
+/** 报文按 UTF-8 编码后的字节数。 */
+export function utf8ByteLength(text: string): number {
+  // Deno 没有 Buffer.byteLength；TextEncoder 是唯一不依赖 node 兼容层的口径。
+  // 调用方已知字节数时（WS 层拿到的是原始帧）应传 frameBytes，省掉这次编码。
+  return UTF8.encode(text).byteLength;
+}
+
 /**
  * 解析一条入站消息。返回 null 表示格式非法，调用方应丢弃（不断连）。
  *
  * 仅严格校验 control 消息的信封字段；`data` 只认 `type`，其余原样保留。
+ *
+ * `frameBytes` 是这条报文的 UTF-8 字节数。WS 层已经知道它，传进来就不必
+ * 为了量长度而把一个 MiB 级的字符串再编码一遍；省略时自行测量。
  */
-export function parseInbound(raw: string): Inbound | null {
-  if (Buffer.byteLength(raw, "utf8") > MAX_PHYSICAL_FRAME_BYTES) return null;
+export function parseInbound(raw: string, frameBytes?: number): Inbound | null {
+  if ((frameBytes ?? utf8ByteLength(raw)) > MAX_PHYSICAL_FRAME_BYTES) return null;
 
   // 快路径：头部扫描认出 data 就直接放行，绝不触碰 payload。
   // 注意这里是有意不做整体合法性校验的——payload 是 base64 分片，其合法性由

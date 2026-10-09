@@ -65,8 +65,7 @@ export function inspectAnchors(source: string): AnchorReport {
     overrideCount,
     functionCount,
     patchable: overrideCount === 1 && functionCount === 1,
-    alreadyPatched:
-      overrideCount === 0 &&
+    alreadyPatched: overrideCount === 0 &&
       functionCount === 1 &&
       countOccurrences(source, OVERRIDE_EXPRESSION) === 1,
   };

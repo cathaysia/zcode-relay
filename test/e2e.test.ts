@@ -1,18 +1,27 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import { assert, assertEquals, assertNotEquals } from "@std/assert";
 
-import { RelayServer } from "../src/relay/server.ts";
+import { type RelayServer, startRelayServer } from "../src/relay/server.ts";
 import { derivePassHash } from "../src/protocol/crypto.ts";
 import { MAX_PHYSICAL_FRAME_BYTES } from "../src/protocol/limits.ts";
+import type { Logger } from "../src/relay/relay.ts";
 import {
   connectTerminal,
   reconnectDevice,
   registerDevice,
   SimClient,
 } from "./helpers/sim-client.ts";
+import { settleEventLoop } from "./helpers/settle.ts";
 
-const PASS_HASH = derivePassHash("e2e-test-password");
-const SILENT = { info: () => {}, warn: () => {} };
+const PASS_HASH = await derivePassHash("e2e-test-password");
+const SILENT: Logger = { info: () => {}, warn: () => {} };
+
+/**
+ * 用例里把 relay 的主动 ping 周期压到 150 ms（默认 10 s）。
+ * 这样"对端只发 FIN、不给关闭帧"的场景能在毫秒级内被判定掉线——
+ * 那正是 Deno 的 node:http 兼容层不上报 FIN 时需要靠 liveness 兜住的情况，
+ * 见 src/relay/liveness.ts。
+ */
+const TEST_LIVENESS_MS = 150;
 
 interface Harness {
   readonly url: string;
@@ -20,9 +29,14 @@ interface Harness {
 }
 
 async function startRelay(): Promise<Harness> {
-  const server = new RelayServer({ host: "127.0.0.1", port: 0, path: "/ws", logger: SILENT });
-  const address = await server.listen();
-  return { url: `ws://127.0.0.1:${address.port}/ws`, server };
+  const server = await startRelayServer({
+    host: "127.0.0.1",
+    port: 0,
+    path: "/ws",
+    logger: SILENT,
+    livenessIntervalMs: TEST_LIVENESS_MS,
+  });
+  return { url: `ws://127.0.0.1:${String(server.address.port)}/ws`, server };
 }
 
 /** 每条用例独立起一个 relay，避免状态串扰。 */
@@ -32,14 +46,15 @@ async function withRelay<T>(fn: (h: Harness) => Promise<T>): Promise<T> {
     return await fn(h);
   } finally {
     await h.server.close();
+    await settleEventLoop();
   }
 }
 
-test("端到端：完整握手，设备注册后 waiting，终端接入后双方 matched", async () => {
+Deno.test("端到端：完整握手，设备注册后 waiting，终端接入后双方 matched", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-1");
-    assert.ok(device.deviceSid.length > 0);
-    assert.equal(
+    assert(device.deviceSid.length > 0);
+    assertEquals(
       (await device.client.expectPairStatus("waiting"))["pair_status"],
       "waiting",
       "无终端时应为 waiting",
@@ -47,7 +62,7 @@ test("端到端：完整握手，设备注册后 waiting，终端接入后双方
 
     const terminal = await connectTerminal(url, PASS_HASH, device.deviceSid);
 
-    assert.equal((await terminal.expectPairStatus("matched"))["pair_status"], "matched");
+    assertEquals((await terminal.expectPairStatus("matched"))["pair_status"], "matched");
     await device.client.expectPairStatus("matched");
 
     await device.client.close();
@@ -55,7 +70,7 @@ test("端到端：完整握手，设备注册后 waiting，终端接入后双方
   });
 });
 
-test("端到端：载荷跨 relay 传输保持字节级不变", async () => {
+Deno.test("端到端：载荷跨 relay 传输保持字节级不变", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-2");
     const terminal = await connectTerminal(url, PASS_HASH, device.deviceSid);
@@ -72,8 +87,8 @@ test("端到端：载荷跨 relay 传输保持字节级不变", async () => {
     device.client.sendRaw(raw);
 
     const msg = await terminal.expectType("data", 2_000);
-    assert.equal(msg["type"], "data");
-    assert.equal(
+    assertEquals(msg["type"], "data");
+    assertEquals(
       terminal.rawReceived[terminal.rawReceived.length - 1],
       raw,
       "relay 必须逐字节转发，不得重排键序或改写空白",
@@ -84,7 +99,7 @@ test("端到端：载荷跨 relay 传输保持字节级不变", async () => {
   });
 });
 
-test("端到端：心跳往返返回 matched", async () => {
+Deno.test("端到端：心跳往返返回 matched", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-3");
     const terminal = await connectTerminal(url, PASS_HASH, device.deviceSid);
@@ -92,22 +107,28 @@ test("端到端：心跳往返返回 matched", async () => {
     await terminal.expectPairStatus("matched");
 
     device.client.clear();
-    device.client.send({ type: "pair_status_query", device_sid: device.deviceSid, client_ts: Date.now() });
+    device.client.send({
+      type: "pair_status_query",
+      device_sid: device.deviceSid,
+      client_ts: Date.now(),
+    });
 
-    assert.equal((await device.client.expectPairStatus("matched"))["pair_status"], "matched");
+    assertEquals((await device.client.expectPairStatus("matched"))["pair_status"], "matched");
 
     await device.client.close();
     await terminal.close();
   });
 });
 
-test("端到端：设备掉线后终端收到 DEVICE_OFFLINE，设备重连后恢复 matched", async () => {
+Deno.test("端到端：设备掉线后终端收到 DEVICE_OFFLINE，设备重连后恢复 matched", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-4");
     const terminal = await connectTerminal(url, PASS_HASH, device.deviceSid);
     await device.client.expectPairStatus("matched");
     await terminal.expectPairStatus("matched");
 
+    // terminate 不发关闭帧，只把 TCP 连接丢掉——这正是 Deno 的 node:http
+    // 不上报 FIN 的场景，掉线判定因此完全依赖 relay 主动 ping（liveness.ts）。
     device.client.terminate();
     await terminal.expectError("DEVICE_OFFLINE");
     terminal.clear();
@@ -115,12 +136,12 @@ test("端到端：设备掉线后终端收到 DEVICE_OFFLINE，设备重连后�
     // 同一 device_sid 重连（persisted 模式，不再注册）
     const device2 = await reconnectDevice(url, PASS_HASH, device.deviceSid, "mid-e2e-4");
     const status = await device2.expectPairStatus("matched");
-    assert.equal(
+    assertEquals(
       status["pair_status"],
       "matched",
       "重连认证成功后必须立刻得到 matched，否则设备会判为陈旧并自行重连",
     );
-    assert.equal(status["type"], "auth_ack");
+    assertEquals(status["type"], "auth_ack");
     await terminal.expectPairStatus("matched");
 
     await device2.close();
@@ -128,7 +149,7 @@ test("端到端：设备掉线后终端收到 DEVICE_OFFLINE，设备重连后�
   });
 });
 
-test("端到端：第二终端抢占，旧终端收 KICKED 且连接被关闭", async () => {
+Deno.test("端到端：第二终端抢占，旧终端收 KICKED 且连接被关闭", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-5");
     const t1 = await connectTerminal(url, PASS_HASH, device.deviceSid);
@@ -138,7 +159,7 @@ test("端到端：第二终端抢占，旧终端收 KICKED 且连接被关闭", 
 
     await t1.expectError("KICKED");
     await new Promise((r) => setTimeout(r, 150));
-    assert.equal(t1.closed, true, "旧终端连接必须被关闭");
+    assertEquals(t1.closed, true, "旧终端连接必须被关闭");
 
     // 新终端接管通信
     t2.clear();
@@ -150,14 +171,14 @@ test("端到端：第二终端抢占，旧终端收 KICKED 且连接被关闭", 
     });
     t2.sendRaw(raw);
     await device.client.expectType("data");
-    assert.equal(device.client.rawReceived.at(-1), raw);
+    assertEquals(device.client.rawReceived.at(-1), raw);
 
     await device.client.close();
     await t2.close();
   });
 });
 
-test("端到端：未知 device_sid 认证失败", async () => {
+Deno.test("端到端：未知 device_sid 认证失败", async () => {
   await withRelay(async ({ url }) => {
     const client = await SimClient.open(`${url}?mid=x`, "terminal");
     client.send({
@@ -167,12 +188,12 @@ test("端到端：未知 device_sid 认证失败", async () => {
       meta: { platform: "web", version: "t", name: "n" },
       client_ts: 1,
     });
-    assert.equal((await client.expectError("AUTH_FAILED"))["code"], "AUTH_FAILED");
+    assertEquals((await client.expectError("AUTH_FAILED"))["code"], "AUTH_FAILED");
     await client.close();
   });
 });
 
-test("端到端：错误 proof 认证失败", async () => {
+Deno.test("端到端：错误 proof 认证失败", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-6");
 
@@ -184,7 +205,7 @@ test("端到端：错误 proof 认证失败", async () => {
       meta: { platform: "web", version: "t", name: "n" },
       client_ts: 1,
     });
-    const challenge = await client.expectType("auth_challenge");
+    await client.expectType("auth_challenge");
     client.send({
       type: "auth_response",
       device_sid: device.deviceSid,
@@ -198,7 +219,7 @@ test("端到端：错误 proof 认证失败", async () => {
   });
 });
 
-test("端到端：无终端时数据不转发也不回显", async () => {
+Deno.test("端到端：无终端时数据不转发也不回显", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-7");
     await device.client.expectPairStatus("waiting");
@@ -213,10 +234,11 @@ test("端到端：无终端时数据不转发也不回显", async () => {
   });
 });
 
-test("端到端：relay 重启后旧 device_sid 失效，设备收到 AUTH_FAILED 可自愈重注册", async () => {
+Deno.test("端到端：relay 重启后旧 device_sid 失效，设备收到 AUTH_FAILED 可自愈重注册", async () => {
   const first = await startRelay();
   const device = await registerDevice(first.url, PASS_HASH, "mid-e2e-8");
   await first.server.close();
+  await settleEventLoop();
 
   // 新实例不持有任何会话（pass_hash 不落盘）
   const second = await startRelay();
@@ -242,14 +264,14 @@ test("端到端：relay 重启后旧 device_sid 失效，设备收到 AUTH_FAILE
       client_ts: 2,
     });
     const ack = await client.expectType("device_register_ack");
-    assert.notEqual(String(ack["device_sid"]), device.deviceSid, "必须颁发新的 device_sid");
+    assertNotEquals(String(ack["device_sid"]), device.deviceSid, "必须颁发新的 device_sid");
     await client.close();
   } finally {
     await second.server.close();
   }
 });
 
-test("端到端：超过 1MiB 的帧被拒绝", async () => {
+Deno.test("端到端：超过 1MiB 的帧被拒绝", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-9");
     const oversized = JSON.stringify({
@@ -257,16 +279,16 @@ test("端到端：超过 1MiB 的帧被拒绝", async () => {
       payload: { zcode_type: "rpc-frame", dataBase64: "A".repeat(MAX_PHYSICAL_FRAME_BYTES) },
       client_ts: 1,
     });
-    assert.ok(Buffer.byteLength(oversized, "utf8") > MAX_PHYSICAL_FRAME_BYTES);
+    assert(new TextEncoder().encode(oversized).byteLength > MAX_PHYSICAL_FRAME_BYTES);
 
     device.client.sendRaw(oversized);
     // 合规客户端不会发出超限帧；此处 relay 在 ws 层拒绝，连接关闭
     await new Promise((r) => setTimeout(r, 300));
-    assert.equal(device.client.closed, true, "超限帧应导致连接被拒绝");
+    assertEquals(device.client.closed, true, "超限帧应导致连接被拒绝");
   });
 });
 
-test("端到端：非法 JSON 被丢弃且不断连", async () => {
+Deno.test("端到端：非法 JSON 被丢弃且不断连", async () => {
   await withRelay(async ({ url }) => {
     const device = await registerDevice(url, PASS_HASH, "mid-e2e-10");
     await device.client.expectPairStatus("waiting");
@@ -279,7 +301,7 @@ test("端到端：非法 JSON 被丢弃且不断连", async () => {
 
     // 连接仍可用：心跳得到应答
     await device.client.expectPairStatus("waiting");
-    assert.equal(device.client.closed, false);
+    assertEquals(device.client.closed, false);
     await device.client.close();
   });
 });

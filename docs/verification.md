@@ -178,6 +178,43 @@ sha256("zcode-credential-fallback:" + platform + ":" + homedir + ":" + username)
 
 **对本方案的影响**：`pass_hash` 在设备侧的存储强度等同于文件权限（600）。因此 relay 侧「只驻内存」的策略把密钥暴露面压到与设备本地同级——若 relay 落盘，等于多一处同等强度的副本。
 
+## L. Deno/Fastify 迁移引入的平台事实
+
+本节记录的是**运行时平台**（Deno 的 node 兼容层）的行为，不是厂商客户端的行为；
+它们是迁移到 Deno + Fastify 之后新增的承重结论（见 `design.md §3` 不变式 5–7）。
+
+**L1 结论**：Deno 的 `node:http` 兼容层**不上报升级连接上对端的 TCP FIN**。
+对端完成 WS 握手后直接关闭 socket（不给关闭帧）时，server 侧既收不到 socket 的
+`end`/`close`，`ws` 也不报错；只有下次往那条连接**写**东西，才会由 RST/写失败
+把它带出来。
+
+**测量**（Fastify + `@fastify/websocket`，客户端用 `Deno.connect` 做原始握手后
+`close()`）：3 秒内 server 侧 socket、`IncomingMessage` 与 ws socket 在
+`end`/`close`/`error`/`aborted` 上零事件；对照实验：客户端在关闭前先写一段非法帧，
+`ws` 立刻报 `Invalid WebSocket frame` 并以 1006 关闭。
+
+**影响**：relay 在设备静默时不会主动写设备那条连接，于是"设备崩溃或断网"永远不会
+被 relay 发现，`DEVICE_OFFLINE` 与终端 15 秒宽限期双双失效。**处置**：relay 按
+ws 官方 isAlive 模式每 10 秒 ping、两个周期无 pong 即判死（`src/relay/liveness.ts`）；
+协议本就允许 relay 主动 ping，且两侧客户端都会自动回 pong（`protocol.md §11`）。
+
+**L2 结论**：客户端中断的 HTTP 连接会在 Deno 的 HTTP 服务器里留一个约 1 秒的
+关停宽限 timer。实测：中断 12 次后等 100 ms 它仍在、等 1100 ms 才消失；Deno 的
+op/resource 泄漏检查按用例归属这类 timer，于是它会以"跨用例泄漏"的形式报出来。
+这不改变 fd 的回收结论——`test/assets-abort.test.ts` 的 lsof 计数在同一次运行里
+稳定为 0 增长。
+
+**L3 结论**（迁移后在真实厂商资源上复验，结果与迁移前一致）：
+
+| 项 | 结果 |
+|---|---|
+| `vendor-assets/assets/index-B-ilXaCQ.js` sha256 | `ba8a371a8df195ae1014e9bc448e2db5c8b5c61b0907d1bf2a81cfb9e318eca4`（与 `manifest.json` 及 `patching.md §2.1` 记录一致） |
+| 服务端内存 overlay 的 patch 产物 | 4,821,509 → 4,821,644 字节，**增量 135**（与 `patching.md §2.1` 记录一致） |
+| 磁盘上的厂商资源是否被改写 | 否，sha256 逐字节未变 |
+| 入口 bundle 的 br 与 identity | br 1,129,235 字节；解压后与 identity 的 4,821,644 字节逐字节一致 |
+| 同端口 HTTP + WS 认证 | `device_register_init` → `device_register_ack` → `auth_challenge` → `auth_ack{pair_status:"waiting"}` 在 `src/serve/main.ts` 上跑通 |
+| `just test` / `just lint` | 149 个用例全绿；`deno check src test` 无错 |
+
 ## 复现命令
 
 ```bash
@@ -187,6 +224,16 @@ rg -o 'overrideUrl:void 0' index.js            # 命中
 
 # E: asar 完整性校验
 strings -n 12 /opt/ZCode/zcode | grep -i 'asar.*integrit'
+
+# L1: Deno 不上报升级连接的 FIN（原始握手后直接关闭，观察 server 侧事件）
+deno eval 'const app=(await import("npm:fastify@5")).default({logger:false});
+  await app.register((await import("npm:@fastify/websocket@11")).default);
+  app.get("/ws",{websocket:true},(s,req)=>{for(const e of ["end","close","error"])req.raw.socket.on(e,()=>console.log("socket."+e));s.on("close",()=>console.log("ws close"));});
+  await app.listen({host:"127.0.0.1",port:0});
+  const p=app.server.address().port,c=await Deno.connect({hostname:"127.0.0.1",port:p});
+  await c.write(new TextEncoder().encode("GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"));
+  await c.read(new Uint8Array(4096)); c.close();
+  await new Promise(r=>setTimeout(r,3000)); console.log("3s 内应无任何事件"); await app.close();'
 
 # G: 本地监听器
 ss -tlnp | grep zcode

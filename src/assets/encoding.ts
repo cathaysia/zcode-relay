@@ -2,16 +2,23 @@
  * 内容协商与压缩。
  *
  * relay 的 WebSocket 转发与 asset server 同进程同事件循环，所以压缩一律走
- * zlib 的**异步**接口（落在 libuv 线程池里），绝不使用 `*Sync`——同步压
- * 4.6 MiB 会把这期间的所有 WS 帧转发卡住。
+ * zlib 的**异步**接口，绝不使用 `*Sync`——同步压 4.6 MiB 会把这期间的所有
+ * WS 帧转发卡住。Deno 的 node:zlib 与 Node 的接口一致，异步版本同样落在
+ * 线程池里；Deno 原生的 CompressionStream 只有 gzip/deflate，没有 br，
+ * 故 brotli 仍走 node:zlib。
  *
- * 为什么是 brotli + gzip 而不是 zstd：Node 24 的 zlib 也支持 zstd，但 brotli
- * 的浏览器覆盖面更广，实测压缩率与耗时都够用（入口 4.60 MiB → 1.08 MiB / 53 ms，
- * 而同一份内容 gzip -6 是 1.23 MiB / 70 ms——gzip 更慢且更大，只作兼容兜底）。
+ * 为什么是 brotli + gzip 而不是 zstd：brotli 的浏览器覆盖面更广，实测压缩率
+ * 与耗时都够用（入口 4.60 MiB → 1.08 MiB / 53 ms，而同一份内容 gzip -6 是
+ * 1.23 MiB / 70 ms——gzip 更慢且更大，只作兼容兜底）。
+ *
+ * 协商为什么自己写而不用 @fastify/accept-negotiator：后者对
+ * `br;q=0, *` 会选中 br，而 RFC 9110 §12.5.3 规定 `*` 只匹配**未显式列出**
+ * 的编码，故 br 被 q=0 显式否决、应答 gzip。这是实测过的行为差异，
+ * 不是风格问题，因此保留下面这份按"显式项优先于通配符"实现的解析。
  */
 
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
-import { extname } from "node:path";
+import { extname } from "@std/path/posix";
 
 import { strongEtag } from "./validators.ts";
 
@@ -90,18 +97,23 @@ export function negotiateEncoding(header: string | string[] | undefined): Conten
 /** 同一份内容在某种编码下的表示。 */
 export interface Variant {
   /** 将要送出的字节。 */
-  readonly body: Buffer;
+  readonly body: Uint8Array;
   /** null 表示未压缩。 */
   readonly encoding: "br" | "gzip" | null;
   /** 对该表示的字节取的强校验符。 */
   readonly etag: string;
 }
 
-function compressWith(encoding: "br" | "gzip", body: Buffer): Promise<Buffer> {
+/** 复制的口径统一：node:zlib 交回的是 Buffer，它是 Uint8Array 的视图。 */
+function toBytes(buffer: Uint8Array): Uint8Array {
+  return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+}
+
+function compressWith(encoding: "br" | "gzip", body: Uint8Array): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
-    const done = (error: Error | null, result: Buffer): void => {
+    const done = (error: Error | null, result: Uint8Array): void => {
       if (error !== null) reject(error);
-      else resolve(result);
+      else resolve(toBytes(result));
     };
     if (encoding === "br") {
       brotliCompress(
@@ -116,28 +128,39 @@ function compressWith(encoding: "br" | "gzip", body: Buffer): Promise<Buffer> {
 }
 
 /** 生成某种编码下的表示。压不小就退回原文，避免"压完更大"。 */
-export async function variantFor(encoding: ContentEncoding, body: Buffer): Promise<Variant> {
-  if (encoding === "identity") return { body, encoding: null, etag: strongEtag(body) };
+export async function variantFor(
+  encoding: ContentEncoding,
+  body: Uint8Array,
+): Promise<Variant> {
+  if (encoding === "identity") return { body, encoding: null, etag: await strongEtag(body) };
 
   const compressed = await compressWith(encoding, body);
   if (compressed.length >= body.length) {
-    return { body, encoding: null, etag: strongEtag(body) };
+    return { body, encoding: null, etag: await strongEtag(body) };
   }
-  return { body: compressed, encoding, etag: strongEtag(compressed) };
+  return { body: compressed, encoding, etag: await strongEtag(compressed) };
 }
 
 /**
  * 内存响应的变体集合（外壳与 patched 入口）。identity 常驻，压缩变体按需生成
  * 并留住，于是每个编码只付一次压缩成本。
+ *
+ * 构造是异步的（校验符要过 Web Crypto），故用 `create()` 而不是构造函数：
+ * 半成品对象一旦泄漏出去，"有字节没指纹"的中间态就会被当成可用表示。
  */
 export class VariantStore {
   readonly #identity: Variant;
   readonly #compressible: boolean;
   readonly #variants = new Map<"br" | "gzip", Variant>();
 
-  constructor(body: Buffer, compressible: boolean) {
-    this.#identity = { body, encoding: null, etag: strongEtag(body) };
-    this.#compressible = compressible && body.length >= MIN_COMPRESS_BYTES;
+  private constructor(identity: Variant, compressible: boolean) {
+    this.#identity = identity;
+    this.#compressible = compressible;
+  }
+
+  static async create(body: Uint8Array, compressible: boolean): Promise<VariantStore> {
+    const identity: Variant = { body, encoding: null, etag: await strongEtag(body) };
+    return new VariantStore(identity, compressible && body.length >= MIN_COMPRESS_BYTES);
   }
 
   get identity(): Variant {

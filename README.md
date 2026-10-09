@@ -27,12 +27,12 @@
 
 | 模块 | 状态 |
 |---|---|
-| 协议层（crypto / limits / messages） | 完成 |
-| relay 核心（认证 / 配对 / 路由 / 心跳） | 完成 |
-| 资源托管（HTTP + 外壳注入 relay 地址 + ETag 协商 + brotli 压缩） | 完成，已在真实资源上验证 |
+| 协议层（crypto / limits / messages） | 完成（Web Crypto 实现） |
+| relay 核心（认证 / 配对 / 路由 / 心跳 / 存活检测） | 完成 |
+| 资源托管（Fastify 路由 + 外壳注入 relay 地址 + ETag 协商 + brotli 压缩） | 完成，已在真实资源上验证 |
 | 资源抓取（递归依赖图 + 断点续抓 + 清单） | 完成，已在真实站点上验证 |
-| 单端口部署入口（HTTP + WS 同端口） | 完成，已端到端验证 |
-| 单元测试 + 端到端测试 | 141 个用例全绿 |
+| 单端口部署入口（HTTP + WS 同端口，一个 Fastify 实例） | 完成，已端到端验证 |
+| 单元测试 + 端到端测试（Deno test） | 149 个用例全绿 |
 | 协议核对工具（echo-relay） | 完成，已冒烟验证 |
 | SPA patch 与漂移检测工具 | 完成，**已在真实厂商构建上验证可应用** |
 | TLS / VPN 绑定 | 未内置 TLS，建议上游反代，见 docs/deploy.md §3 |
@@ -133,8 +133,19 @@ ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:18899/ws /Applications/ZCod
 
 ## 技术栈
 
-TypeScript 直接跑在 Node 24 的类型擦除上：**无构建步骤**，测试用内置
-`node:test`，唯一运行依赖是 `ws`。约束见 [AGENTS.md](AGENTS.md)。
+**Deno**（无构建步骤、无 `node_modules`）：TypeScript 直接跑在类型擦除上，
+测试用内置 `deno test`，依赖与任务写在 `deno.json`。
+HTTP 与 WebSocket 都跑在 **Fastify** 上（`@fastify/websocket`，内部即 `ws`）：
+机制（路由、方法分派、HEAD、404/405、响应中断时的流清理）归框架，
+缓存策略与内容协商归本仓库——分工与理由见 [docs/design.md](docs/design.md) §3，
+硬约束见 [AGENTS.md](AGENTS.md)。
+
+```sh
+mise install      # 按 mise.toml 装 Deno
+just install      # 拉依赖（deno install）
+just test         # 全部测试
+just lint         # deno check
+```
 
 ## 文档
 

@@ -1,9 +1,8 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import { assert, assertEquals } from "@std/assert";
 
 import { getPlatformConfigGuide } from "../src/platform.ts";
 
-test("getPlatformConfigGuide macOS", () => {
+Deno.test("getPlatformConfigGuide macOS", () => {
   const guide = getPlatformConfigGuide({
     relayUrl: "ws://127.0.0.1:18899/ws",
     derivedOrigin: "http://127.0.0.1:18899",
@@ -11,14 +10,18 @@ test("getPlatformConfigGuide macOS", () => {
     platform: "darwin",
   });
 
-  assert.equal(guide.osName, "macOS");
-  assert.ok(guide.portCheckCommand.includes("lsof"));
-  assert.ok(guide.configExample.includes("ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:18899/ws"));
-  assert.ok(guide.configExample.includes("open -a \"/Applications/ZCode.app\""));
-  assert.ok(guide.launchExample.includes("/Applications/ZCode.app/Contents/MacOS/ZCode"));
+  assertEquals(guide.osName, "macOS");
+  assert(guide.portCheckCommand.includes("lsof"));
+  assert(
+    guide.configExample.includes(
+      "ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:18899/ws",
+    ),
+  );
+  assert(guide.configExample.includes('open -a "/Applications/ZCode.app"'));
+  assert(guide.launchExample.includes("/Applications/ZCode.app/Contents/MacOS/ZCode"));
 });
 
-test("getPlatformConfigGuide Linux", () => {
+Deno.test("getPlatformConfigGuide Linux", () => {
   const guide = getPlatformConfigGuide({
     relayUrl: "ws://127.0.0.1:18899/ws",
     derivedOrigin: "http://127.0.0.1:18899",
@@ -26,9 +29,18 @@ test("getPlatformConfigGuide Linux", () => {
     platform: "linux",
   });
 
-  assert.equal(guide.osName, "Linux");
-  assert.ok(guide.portCheckCommand.includes("ss -tlnp"));
-  assert.ok(guide.configInstruction.includes("zcode.desktop"));
-  assert.ok(guide.configExample.includes("/opt/ZCode/zcode %U"));
-  assert.ok(guide.launchExample.includes("/opt/ZCode/zcode"));
+  assertEquals(guide.osName, "Linux");
+  assert(guide.portCheckCommand.includes("ss -tlnp"));
+  assert(guide.configInstruction.includes("zcode.desktop"));
+  assert(guide.configExample.includes("/opt/ZCode/zcode %U"));
+  assert(guide.launchExample.includes("/opt/ZCode/zcode"));
+});
+
+Deno.test("未显式传平台时按 Deno.build.os 推导", () => {
+  const guide = getPlatformConfigGuide({
+    relayUrl: "ws://127.0.0.1:18899/ws",
+    derivedOrigin: "http://127.0.0.1:18899",
+    port: 18899,
+  });
+  assertEquals(guide.osName, Deno.build.os === "darwin" ? "macOS" : "Linux");
 });

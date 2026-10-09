@@ -2,7 +2,7 @@
  * Relay 核心。承载四个职责：认证、配对状态、定向转发、心跳应答。
  * 逐条对应 docs/protocol.md §10 的必需行为。
  *
- * 两条容易做错的地方，实现里都显式处理了：
+ * 三条容易做错的地方，实现里都显式处理了：
  *
  * 1. 设备侧的 wasPaired 不会被普通断线重连重置，所以设备一旦重连并认证
  *    成功，relay **必须**立即把当前状态（通常是 matched）发给它，否则设备
@@ -11,13 +11,18 @@
  * 2. 反过来，配对状态不能振荡——设备每次收到 waiting 都是有破坏性的
  *    （第一次触发 15 秒恢复窗口，第二次直接重连）。因此除认证后的强制发送
  *    之外，状态只在**真正变化**时推送。
+ *
+ * 3. 认证校验是异步的（Web Crypto 无同步 HMAC，见 protocol/crypto.ts）。
+ *    因此认证路径按连接串行化，且校验返回后要重新确认连接还活着——否则
+ *    "校验期间对端断开"会留下一条指向死 socket 的会话。data 转发不进队列，
+ *    逐帧零额外开销。
  */
 
 import type { Conn } from "./conn.ts";
-import { SessionRegistry, type Session } from "./registry.ts";
+import { type Session, SessionRegistry } from "./registry.ts";
 import type { AuthRole, PairStatus } from "../protocol/limits.ts";
-import { calculateProof, createDeviceSid, createNonce, verifyProof } from "../protocol/crypto.ts";
-import { parseInbound, type Inbound } from "../protocol/messages.ts";
+import { createDeviceSid, createNonce, verifyProof } from "../protocol/crypto.ts";
+import { type Inbound, parseInbound } from "../protocol/messages.ts";
 
 export interface Logger {
   info(message: string, fields?: Record<string, unknown>): void;
@@ -41,6 +46,7 @@ export class RelayCore {
   readonly #registry = new SessionRegistry();
   readonly #attached = new Map<Conn, Attachment>();
   readonly #pending = new Map<Conn, Pending>();
+  readonly #authQueue = new Map<Conn, Promise<void>>();
   readonly #log: Logger;
 
   constructor(log: Logger = NOOP_LOGGER) {
@@ -56,8 +62,14 @@ export class RelayCore {
     this.#log.info("connect", { conn: conn.id, mid: conn.queryMid });
   }
 
-  handleMessage(conn: Conn, raw: string): void {
-    const msg = parseInbound(raw);
+  /**
+   * 处理一条入站报文。返回值在"这条报文引发的处理"结束时 resolve。
+   *
+   * data 转发是同步完成的：async 函数体在第一个 await 之前同步执行，而
+   * #onData 里没有任何 await，故逐帧保序不受影响。
+   */
+  async handleMessage(conn: Conn, raw: string, frameBytes?: number): Promise<void> {
+    const msg = parseInbound(raw, frameBytes);
     if (msg === null) {
       // 格式非法或超限：丢弃该消息，不断连
       this.#log.warn("drop malformed message", { conn: conn.id, bytes: raw.length });
@@ -71,7 +83,7 @@ export class RelayCore {
         this.#onAuthInit(conn, msg);
         return;
       case "auth_response":
-        this.#onAuthResponse(conn, msg);
+        await this.#serializeAuth(conn, () => this.#onAuthResponse(conn, msg));
         return;
       case "pair_status_query":
         this.#onHeartbeat(conn, msg);
@@ -84,6 +96,7 @@ export class RelayCore {
 
   handleClose(conn: Conn): void {
     this.#pending.delete(conn);
+    this.#authQueue.delete(conn);
     const att = this.#attached.get(conn);
     if (att === undefined) {
       this.#log.info("close (unauthenticated)", { conn: conn.id });
@@ -138,12 +151,16 @@ export class RelayCore {
     this.#log.info("challenge issued", { conn: conn.id, role: msg.role, sid: session.deviceSid });
   }
 
-  #onAuthResponse(conn: Conn, msg: Extract<Inbound, { type: "auth_response" }>): void {
+  async #onAuthResponse(
+    conn: Conn,
+    msg: Extract<Inbound, { type: "auth_response" }>,
+  ): Promise<void> {
     const pending = this.#pending.get(conn);
     if (pending === undefined) {
       conn.sendError("AUTH_FAILED", "no pending challenge");
       return;
     }
+    // 先同步消费掉挑战，再 await：异步窗口期内的第二条应答不应再匹配到它。
     this.#pending.delete(conn);
 
     if (pending.session.deviceSid !== msg.deviceSid) {
@@ -152,19 +169,26 @@ export class RelayCore {
     }
 
     // proof 与 role 字符串绑定，角色弄错必然不匹配
-    const expected = calculateProof(
+    const ok = await verifyProof(
       pending.session.passHash,
       pending.nonce,
       pending.role,
       pending.session.deviceSid,
+      msg.proof,
     );
-    if (!verifyProof(expected, msg.proof)) {
+    if (!ok) {
       conn.sendError("AUTH_FAILED", "proof mismatch");
       this.#log.warn("auth failed", {
         conn: conn.id,
         role: pending.role,
         sid: pending.session.deviceSid,
       });
+      return;
+    }
+
+    // 校验期间对端可能已断开：附着一条死连接会让会话永远显示 matched。
+    if (!conn.isOpen) {
+      this.#log.warn("connection closed during auth verification", { conn: conn.id });
       return;
     }
 
@@ -175,6 +199,27 @@ export class RelayCore {
       sid: pending.session.deviceSid,
     });
     this.#sendStatusOnAuth(conn, pending.session, pending.role);
+  }
+
+  /**
+   * 认证路径按连接串行化。异步校验若不串行，同一连接上的两条 auth_response
+   * 会交叠：后到的那条会在第一条附着之前被判成"无待验证挑战"，于是
+   * AUTH_FAILED 会插到 auth_ack 前面到达——而 AUTH_FAILED 在客户端是致命的。
+   * 串行化后处理顺序恒等于到达顺序，与同步实现一致。
+   */
+  #serializeAuth(conn: Conn, task: () => Promise<void>): Promise<void> {
+    const previous = this.#authQueue.get(conn) ?? Promise.resolve();
+    const chained = previous.then(task, task).catch((err: unknown) => {
+      this.#log.warn("auth handler failed", {
+        conn: conn.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    const settled = chained.finally(() => {
+      if (this.#authQueue.get(conn) === settled) this.#authQueue.delete(conn);
+    });
+    this.#authQueue.set(conn, settled);
+    return settled;
   }
 
   // ---- 附着与配对状态 ----

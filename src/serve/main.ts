@@ -1,5 +1,5 @@
 /**
- * 单端口部署入口：同一个 HTTP server 同时提供 SPA 资源与 relay WebSocket。
+ * 单端口部署入口：一个 Fastify 实例同时提供 SPA 资源与 relay WebSocket。
  *
  * 启动前会做预检并把 relay patch 套在**内存 overlay** 上：
  *   - 磁盘上的厂商资源保持原样（manifest.json 的 sha256 始终可校验）
@@ -19,19 +19,20 @@
  *   ZCODE_SERVE_ALLOW_UNPATCHED=1 预检失败时仍启动（仅供排查，不推荐）
  */
 
-import { createServer } from "node:http";
-import { stat } from "node:fs/promises";
-import { join } from "node:path";
-import { WebSocketServer } from "ws";
+import fastify from "fastify";
+import * as posix from "@std/path/posix";
 
-import { AssetServer, type PrepareReport } from "../assets/server.ts";
-import { RelayCore, type Logger } from "../relay/relay.ts";
-import { acceptConnections, WS_MAX_PAYLOAD } from "../relay/accept.ts";
+import { AssetProvider, type PrepareReport } from "../assets/provider.ts";
+import { registerAssetRoutes } from "../assets/routes.ts";
+import { type Logger, RelayCore } from "../relay/relay.ts";
+import { registerRelayRoutes } from "../relay/routes.ts";
 import { getPlatformConfigGuide } from "../platform.ts";
 
 const logger: Logger = {
   info(message, fields) {
-    console.log(JSON.stringify({ ts: new Date().toISOString(), level: "info", message, ...fields }));
+    console.log(
+      JSON.stringify({ ts: new Date().toISOString(), level: "info", message, ...fields }),
+    );
   },
   warn(message, fields) {
     console.warn(
@@ -44,18 +45,18 @@ const LINE = "=".repeat(78);
 const THIN = "-".repeat(78);
 
 function envString(name: string, fallback: string): string {
-  const v = process.env[name]?.trim();
-  return v !== undefined && v.length > 0 ? v : fallback;
+  const value = Deno.env.get(name)?.trim();
+  return value !== undefined && value.length > 0 ? value : fallback;
 }
 
 function envFlag(name: string): boolean {
-  return process.env[name]?.trim() === "1";
+  return Deno.env.get(name)?.trim() === "1";
 }
 
 const host = envString("ZCODE_RELAY_HOST", "127.0.0.1");
 const port = Number(envString("ZCODE_RELAY_PORT", "18899"));
 const wsPath = envString("ZCODE_RELAY_PATH", "/ws");
-const assetsDir = process.env["ZCODE_ASSETS_DIR"]?.trim();
+const assetsDir = Deno.env.get("ZCODE_ASSETS_DIR")?.trim();
 // 空字符串等同于未设置，否则会推导出空地址
 const publicOrigin = envString("ZCODE_PUBLIC_ORIGIN", "") || undefined;
 const noPatch = envFlag("ZCODE_SERVE_NO_PATCH");
@@ -64,17 +65,17 @@ const allowUnpatched = envFlag("ZCODE_SERVE_ALLOW_UNPATCHED");
 if (assetsDir === undefined || assetsDir.length === 0) {
   console.error("必须设置 ZCODE_ASSETS_DIR 指向抓取后的资源目录。");
   console.error("先执行: just fetch-assets ./vendor-assets");
-  process.exit(2);
+  Deno.exit(2);
 }
 if (!Number.isInteger(port) || port <= 0 || port > 65535) {
   console.error(`ZCODE_RELAY_PORT 必须是 1..65535 的整数，收到 ${String(port)}`);
-  process.exit(2);
+  Deno.exit(2);
 }
 
 // 资源目录自检：缺 index.html 时给出可执行的下一步
 try {
-  const info = await stat(join(assetsDir, "index.html"));
-  if (!info.isFile()) throw new Error("not a file");
+  const info = await Deno.stat(posix.join(assetsDir, "index.html"));
+  if (!info.isFile) throw new Error("not a file");
 } catch {
   console.error(LINE);
   console.error(`资源目录里没有 index.html: ${assetsDir}`);
@@ -85,13 +86,13 @@ try {
   console.error(`  just fetch-assets ${assetsDir}`);
   console.error("");
   console.error("抓取是幂等的，中断后重跑会跳过已抓文件。");
-  process.exit(2);
+  Deno.exit(2);
 }
 
 const derivedOrigin = publicOrigin ?? `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
 const relayUrl = `${derivedOrigin.replace(/^http/, "ws")}${wsPath}`;
 
-const assets = new AssetServer({
+const assets = new AssetProvider({
   rootDir: assetsDir,
   relayUrl,
   patchEntryBundle: !noPatch,
@@ -105,7 +106,7 @@ try {
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`预检失败: ${message}`);
-  process.exit(1);
+  Deno.exit(1);
 }
 
 console.log(LINE);
@@ -130,13 +131,16 @@ if (report.patch === "failed") {
   console.log("若继续启动，SPA 会连回厂商 relay —— 这不是你想要的，故默认拒绝启动。");
   console.log("");
   console.log("排查方向：");
-  console.log("  1. 漂移检测   just patch-check " + join(assetsDir, "assets", report.entryBundle ?? "<entry>"));
+  console.log(
+    "  1. 漂移检测   just patch-check " +
+      posix.join(assetsDir, "assets", report.entryBundle ?? "<entry>"),
+  );
   console.log("  2. 重新抓取   just fetch-assets " + assetsDir);
   console.log("  3. 确认 patch 面 docs/patching.md §5");
   console.log("");
   if (!allowUnpatched) {
     console.log("仅在排查时可用 ZCODE_SERVE_ALLOW_UNPATCHED=1 强制启动。");
-    process.exit(1);
+    Deno.exit(1);
   }
   console.log("已设置 ZCODE_SERVE_ALLOW_UNPATCHED=1，继续启动（不推荐）。");
 }
@@ -148,19 +152,11 @@ if (report.patch === "disabled") {
 
 // ---- 启动 ----
 const core = new RelayCore(logger);
-const httpServer = createServer(assets.handler());
-const wss = new WebSocketServer({
-  server: httpServer,
-  path: wsPath,
-  maxPayload: WS_MAX_PAYLOAD,
-  perMessageDeflate: true,
-});
-acceptConnections(wss, core, logger, undefined);
+const app = fastify({ logger: false, forceCloseConnections: true });
+registerAssetRoutes(app, { provider: assets, logger });
+await registerRelayRoutes(app, { path: wsPath, core, logger, tap: undefined });
 
-await new Promise<void>((resolve, reject) => {
-  httpServer.once("error", reject);
-  httpServer.listen(port, host, resolve);
-});
+await app.listen({ host, port });
 
 const guide = getPlatformConfigGuide({ relayUrl, derivedOrigin, port });
 
@@ -203,11 +199,10 @@ if (host === "0.0.0.0" || host === "::") {
 
 let shuttingDown = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
+  Deno.addSignalListener(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info("shutting down", { signal });
-    for (const client of wss.clients) client.terminate();
-    httpServer.close(() => process.exit(0));
+    void app.close().then(() => Deno.exit(0));
   });
 }

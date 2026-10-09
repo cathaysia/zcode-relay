@@ -2,6 +2,9 @@
  * 模拟 device / terminal 客户端，走真实 WebSocket。
  * 行为按 docs/protocol.md §4 的报文与时序实现。
  *
+ * 客户端用 `ws`（而不是 Deno 原生 WebSocket）：设备侧必须能发自定义请求头
+ * `X-Device-ID`，而 WHATWG WebSocket 的第二个参数是子协议，发不了请求头。
+ *
  * 注意 expectType 是**消费式**的：命中的消息不会被后续 expect 再次匹配。
  * 这让"等待下一条同类型消息"的断言能够成立。
  */
@@ -20,10 +23,11 @@ interface Waiter {
   readonly label: string;
   readonly resolve: (msg: Record<string, unknown>) => void;
   readonly reject: (err: Error) => void;
-  readonly timer: NodeJS.Timeout;
+  readonly timer: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 4_000;
+const UTF8_DECODER = new TextDecoder("utf-8");
 
 export class SimClient {
   readonly role: AuthRole;
@@ -36,8 +40,12 @@ export class SimClient {
   private constructor(socket: WebSocket, role: AuthRole) {
     this.#socket = socket;
     this.role = role;
-    socket.on("message", (data: Buffer) => {
-      const text = data.toString("utf8");
+    socket.on("message", (data: unknown) => {
+      const text = typeof data === "string"
+        ? data
+        : data instanceof ArrayBuffer
+        ? UTF8_DECODER.decode(new Uint8Array(data))
+        : UTF8_DECODER.decode(data as Uint8Array);
       let msg: Record<string, unknown> | null = null;
       try {
         const parsed: unknown = JSON.parse(text);
@@ -120,7 +128,9 @@ export class SimClient {
 
   expectPairStatus(status: string, timeoutMs?: number): Promise<Record<string, unknown>> {
     return this.#expect(
-      (m) => (m["type"] === "auth_ack" || m["type"] === "pair_status_ack") && m["pair_status"] === status,
+      (m) =>
+        (m["type"] === "auth_ack" || m["type"] === "pair_status_ack") &&
+        m["pair_status"] === status,
       `pair_status=${status}`,
       timeoutMs,
     );
@@ -147,11 +157,16 @@ export class SimClient {
     this.#socket.send(text);
   }
 
-  replyChallenge(passHash: string, deviceSid: string, role: AuthRole, nonce: string): void {
+  async replyChallenge(
+    passHash: string,
+    deviceSid: string,
+    role: AuthRole,
+    nonce: string,
+  ): Promise<void> {
     this.send({
       type: "auth_response",
       device_sid: deviceSid,
-      proof: calculateProof(passHash, nonce, role, deviceSid),
+      proof: await calculateProof(passHash, nonce, role, deviceSid),
       client_ts: Date.now(),
     });
   }
@@ -222,7 +237,7 @@ export async function registerDevice(
     client_ts: Date.now(),
   });
   const challenge = await client.expectType("auth_challenge");
-  client.replyChallenge(passHash, deviceSid, "device", String(challenge["nonce"]));
+  await client.replyChallenge(passHash, deviceSid, "device", String(challenge["nonce"]));
   return { client, deviceSid };
 }
 
@@ -244,7 +259,7 @@ export async function reconnectDevice(
     client_ts: Date.now(),
   });
   const challenge = await client.expectType("auth_challenge");
-  client.replyChallenge(passHash, deviceSid, "device", String(challenge["nonce"]));
+  await client.replyChallenge(passHash, deviceSid, "device", String(challenge["nonce"]));
   return client;
 }
 
@@ -263,6 +278,6 @@ export async function connectTerminal(
     client_ts: Date.now(),
   });
   const challenge = await client.expectType("auth_challenge");
-  client.replyChallenge(passHash, deviceSid, "terminal", String(challenge["nonce"]));
+  await client.replyChallenge(passHash, deviceSid, "terminal", String(challenge["nonce"]));
   return client;
 }

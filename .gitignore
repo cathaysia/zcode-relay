@@ -12,6 +12,7 @@ certs/
 *.crt
 
 # 依赖与构建
+# 注意：deno.lock 是**要**提交的（依赖锁定，见 AGENTS.md），别加进来。
 node_modules/
 target/
 build/

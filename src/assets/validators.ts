@@ -5,7 +5,7 @@
  * 领域判断，而校验符的计算是通用的，可以脱离 HTTP 单独测试。
  */
 
-import { createHash } from "node:crypto";
+import { encodeBase64Url } from "@std/encoding/base64url";
 
 /**
  * 强 ETag，对**实际送出的字节**取 sha256。
@@ -16,9 +16,11 @@ import { createHash } from "node:crypto";
  * 配到 identity 的字节上。
  *
  * 内容确定 ⇒ 该值跨进程重启稳定，浏览器重启后仍能命中 304。
+ * 用 Web Crypto 而不是 node:crypto：Deno 原生支持，且是唯一的摘要入口。
  */
-export function strongEtag(body: Buffer): string {
-  return `"${createHash("sha256").update(body).digest("base64url")}"`;
+export async function strongEtag(body: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", body);
+  return `"${encodeBase64Url(new Uint8Array(digest))}"`;
 }
 
 /**

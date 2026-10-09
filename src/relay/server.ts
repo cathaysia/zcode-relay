@@ -1,15 +1,14 @@
 /**
  * WS 接入层（独立模式）：relay 自己监听一个端口，只服务 WebSocket。
  *
- * 若要与 SPA 资源同端口部署，用 src/serve/main.ts，它复用
- * src/relay/accept.ts 的接线逻辑但把 HTTP 交给资源处理器。
+ * 若要与 SPA 资源同端口部署，用 src/serve/main.ts —— 它把同一套
+ * `registerRelayRoutes` 注册到资源共享的那个 Fastify 实例上。
  */
 
-import { WebSocketServer } from "ws";
-import type { AddressInfo } from "node:net";
+import fastify from "fastify";
 
-import { RelayCore, type Logger } from "./relay.ts";
-import { acceptConnections, WS_MAX_PAYLOAD } from "./accept.ts";
+import { type Logger, RelayCore } from "./relay.ts";
+import { registerRelayRoutes } from "./routes.ts";
 import type { FrameTap } from "./conn.ts";
 
 const NOOP_LOGGER: Logger = { info: () => {}, warn: () => {} };
@@ -22,46 +21,60 @@ export interface RelayServerOptions {
   readonly logger?: Logger;
   /** 帧观测点，用于调试与协议核对。不参与协议语义。 */
   readonly tap?: FrameTap | undefined;
+  /** relay 主动 ping 的周期，见 routes.ts 与 liveness.ts。 */
+  readonly livenessIntervalMs?: number | undefined;
 }
 
-export class RelayServer {
-  readonly #core: RelayCore;
-  readonly #wss: WebSocketServer;
+export interface RelayAddress {
+  readonly address: string;
+  readonly port: number;
+}
 
-  constructor(options: RelayServerOptions) {
-    const log = options.logger ?? NOOP_LOGGER;
-    this.#core = new RelayCore(log);
-    this.#wss = new WebSocketServer({
-      host: options.host,
-      port: options.port,
-      path: options.path,
-      // 与协议上限一致：超限帧在 ws 层就被拒绝，避免无界缓冲。
-      // 合规客户端发送前会自行检查上限，故不会触发。
-      maxPayload: WS_MAX_PAYLOAD,
-      // 接受 permessage-deflate；拒绝亦可，两端都容忍。
-      perMessageDeflate: true,
-    });
-    acceptConnections(this.#wss, this.#core, log, options.tap);
+export interface RelayServer {
+  /** 供测试注入或直接驱动（app.inject）使用。 */
+  readonly app: Awaited<ReturnType<typeof buildRelayApp>>;
+  readonly core: RelayCore;
+  readonly address: RelayAddress;
+  close(): Promise<void>;
+}
+
+async function buildRelayApp(
+  options: RelayServerOptions,
+  core: RelayCore,
+): Promise<fastify.FastifyInstance> {
+  const log = options.logger ?? NOOP_LOGGER;
+  const app = fastify({
+    logger: false,
+    // 关服务时连保活连接一起收掉，否则 close 要等对端先走。
+    forceCloseConnections: true,
+  });
+  await registerRelayRoutes(app, {
+    path: options.path,
+    core,
+    logger: log,
+    tap: options.tap,
+    livenessIntervalMs: options.livenessIntervalMs,
+  });
+  return app;
+}
+
+/** 起一个只服务 WebSocket 的 relay；port 传 0 可让系统分配。 */
+export async function startRelayServer(options: RelayServerOptions): Promise<RelayServer> {
+  const core = new RelayCore(options.logger ?? NOOP_LOGGER);
+  const app = await buildRelayApp(options, core);
+  await app.listen({ host: options.host, port: options.port });
+
+  const bound = app.server.address();
+  if (bound === null || typeof bound === "string") {
+    throw new Error("relay server has no TCP address");
   }
 
-  get core(): RelayCore {
-    return this.#core;
-  }
-
-  async listen(): Promise<AddressInfo> {
-    await new Promise<void>((resolve, reject) => {
-      this.#wss.once("listening", resolve);
-      this.#wss.once("error", reject);
-    });
-    const address = this.#wss.address();
-    if (address === null || typeof address === "string") {
-      throw new Error("relay server has no TCP address");
-    }
-    return address;
-  }
-
-  async close(): Promise<void> {
-    for (const client of this.#wss.clients) client.terminate();
-    await new Promise<void>((resolve) => this.#wss.close(() => resolve()));
-  }
+  return {
+    app,
+    core,
+    address: { address: bound.address, port: bound.port },
+    close: async () => {
+      await app.close();
+    },
+  };
 }

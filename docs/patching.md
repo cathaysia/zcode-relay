@@ -76,6 +76,19 @@ just patch-apply <in> <out>          # 应用 patch，写出到指定路径
 
 注意 `overrideUrl:` 在锚点与替换表达式中相同，故字节级 diff 的首个差异点落在锚点内部（+12 字节处），这是预期现象。
 
+**2026-10-09 复验（迁移到 Deno 之后）**：同一构建上重跑上述三项，结论不变——增量 135、首处差异（偏移 4804045）之前的前缀逐字节一致、位移对齐后的后缀逐字节一致；`just patch-check` 报两个锚点各出现 1 次，sha256 与上表一致。工具的第三项检查从 `node --check` 换成 Deno 侧的等价物（`test/patch-spa.test.ts` 用 `new Function` 做语法解析，不执行代码）。CLI 现在通过 `deno task patch-check` / `deno task patch-apply` 运行，上面两条 `just` 配方已转调它们。
+
+留档用的复现片段（校验 patch 产物只有一处改动）：
+
+```sh
+just patch-apply vendor-assets/assets/index-B-ilXaCQ.js /tmp/patched.js
+python3 -c '
+a=open("vendor-assets/assets/index-B-ilXaCQ.js","rb").read(); b=open("/tmp/patched.js","rb").read()
+d=len(b)-len(a); i=0
+while i < min(len(a), len(b)) and a[i]==b[i]: i+=1
+print(d, a[:i]==b[:i], a[i:]==b[i+d:])'   # 期望输出: 135 True True
+```
+
 ### 2.2 正常部署不需要手动 patch
 
 `just serve` 会在启动预检时把上述 patch 套在**内存 overlay** 上，磁盘上的厂商

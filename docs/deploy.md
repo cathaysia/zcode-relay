@@ -36,9 +36,13 @@ ES module 语义也依赖同源。因此资源必须托管在**同一源的精�
 
 ## 2. 部署步骤
 
+**运行环境**：只需要 Deno（`mise install` 会按 `mise.toml` 装好）。依赖由
+`just install`（即 `deno install`）拉进 Deno 的全局缓存，没有 `node_modules`，
+也没有构建步骤。
+
 ### 2.1 抓取资源
 
-先小批量验证，再全量。全量约 2100 个文件，工具默认串行 + 50ms 间隔。
+先小批量验证，再全量。全量约 2100 个文件，工具默认 8 并发、不限速。
 
 ```sh
 # 小批量验证（约 3 个请求）
@@ -238,3 +242,13 @@ patch 面变了，按 `docs/patching.md §5` 重新确认。
 **relay 重启后二维码失效**
 预期行为。`pass_hash` 只驻内存不落盘（见 `docs/design.md §S5`），重启后
 设备会收到 `AUTH_FAILED` 并自动重新注册，到桌面端重新开启一次即可。
+
+**启动日志里有一行 `Not implemented: Server.setTimeout()`**
+这是 Deno 的 `node:http` 兼容层对 Fastify 初始化调用的提示，不是错误，也
+不影响任何行为（连接超时由 relay 自己的存活检测覆盖）。每个进程只出现一次。
+
+**设备掉线后终端要等一会儿才显示「桌面端已断开」**
+预期行为，最长约 20 秒。Deno 的 `node:http` 兼容层不会上报升级连接上对端的
+TCP FIN，所以"设备崩溃/断网"这类没有关闭帧的断开只能靠 relay 主动 ping 发现
+（每 10 秒一次，两个周期无响应即判死，见 `docs/design.md §3` 不变式 7）。
+设备正常关闭时会立刻走 `DEVICE_OFFLINE`。
