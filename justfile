@@ -86,7 +86,11 @@ serve host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="":
     }
     trap cleanup EXIT INT TERM
 
-    exec deno task --quiet serve
+    # 不能 exec：exec 会用 serve 进程替换掉 bash，shell 的 trap 随之消失，
+    # 于是 Ctrl-C / SIGTERM 退出时那份 Tailscale 反代配置不会被清掉，
+    # 会留下一条指向已停端口的转发规则。后台运行 + wait 让 trap 始终有效。
+    deno task --quiet serve &
+    wait $!
 
 # 启动 ZCode 桌面端客户端，并注入自托管 Relay 环境变量（支持跨机器指向远端 Relay）
 zcode origin="":
@@ -136,21 +140,17 @@ up host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="":
     set -euo pipefail
     (
         sleep 2
-        just zcode origin="{{origin}}"
+        just zcode "{{origin}}"
     ) &
-    just serve host="{{host}}" port="{{port}}" assetsdir="{{assetsdir}}" origin="{{origin}}"
+    just serve "{{host}}" "{{port}}" "{{assetsdir}}" "{{origin}}"
 
 # 销毁下载的 SPA 资源与反代配置（清空 vendor-assets、清理 tailscale serve）
-destroy assetsdir="vendor-assets":
+destroy:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "==> 开始清理与销毁资源..."
     if command -v tailscale >/dev/null 2>&1; then
         echo "--> 重置 Tailscale Serve 配置..."
         tailscale serve reset >/dev/null 2>&1 || true
-    fi
-    if [ -d "{{assetsdir}}" ]; then
-        echo "--> 删除静态资源目录 {{assetsdir}}..."
-        rm -rf "{{assetsdir}}"
     fi
     echo "==> 销毁完成。"
