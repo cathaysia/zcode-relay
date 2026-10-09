@@ -143,7 +143,7 @@ done
 
 - **无运行时版本清单**：`version.json` / `manifest.json` / `latest.json` 均 404，代码也不去取。
 - **无 Service Worker、无自更新**：全库无 `navigator.serviceWorker` / `workbox` / `caches.*`。
-- 缓存头：外壳 `no-store`（每次重新校验）；哈希资源 `max-age=31536000, immutable`。
+- 缓存头（厂商站）：外壳 `no-store`（每次重新校验）；哈希资源 `max-age=31536000, immutable`。自托管时只有后一类照搬——外壳与 patched 入口改发 `no-cache` 加强 ETag，理由见 `docs/design.md` §3 的托管不变式。
 - 已打开的标签页会继续跑它已加载的版本；新访问拿到新构建。
 
 **真实失效模式**：钉住的自托管副本不会感知厂商发布，会一直工作；出问题是在**桌面端升级**、改变了终端必须说的协议时。配对契约是共享 chunk 里的链接参数解析（`sid`/`hash`/`t`/`mid`/`name`/`app_version`/`theme`）与 relay 帧/关闭码协议。

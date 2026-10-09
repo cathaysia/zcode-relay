@@ -28,6 +28,16 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { Logger } from "../relay/relay.ts";
 import { applyRelayPatch, inspectAnchors } from "../tools/patch-spa.ts";
+import {
+  CompressedCache,
+  isCompressible,
+  negotiateEncoding,
+  VariantStore,
+  variantFor,
+  type ContentEncoding,
+  type Variant,
+} from "./encoding.ts";
+import { etagMatches } from "./validators.ts";
 
 const LOG_PREFIX = "/remote/v4";
 const LATEST_PREFIX = `${LOG_PREFIX}/latest/`;
@@ -73,15 +83,27 @@ function contentTypeFor(path: string): string {
 }
 
 /**
- * 缓存策略。注意入口 bundle 被 patch 后**内容已与其文件名中的哈希不符**，
- * 所以不能再用 immutable——否则浏览器会把打过补丁的版本钉住一年，
- * 将来换 relay 地址时无法更新。
+ * 需要每次回源校验的两类响应：外壳（内嵌 relay 地址）与入口 bundle。
+ *
+ * no-cache 与 no-store 的区别是这条策略的关键：no-store 禁止浏览器留副本，
+ * 于是每次页面加载都要重下整个入口（实测 4.6 MiB）；no-cache 允许留副本，
+ * 只要求复用前回源问一次。配合下方 ETag，未变时回 304，重复访问的流量
+ * 从整个入口降到一次条件请求。
+ *
+ * 入口**不能**用 immutable——补丁后内容已与文件名中的哈希不符，允许无条件
+ * 复用会把旧 relay 地址钉死一年。no-cache 恰好保留了这种可更新性：
+ * 补丁后的字节一变，ETag 就变，浏览器立刻拿到新版本。
  */
-function cacheControlFor(relativePath: string, isPatchedEntry: boolean): string {
-  if (relativePath === "index.html") return "no-cache, no-store, must-revalidate";
-  if (isPatchedEntry) return "no-store";
-  return "public, max-age=31536000, immutable";
-}
+const CACHE_REVALIDATE = "no-cache";
+
+/** 文件名内含内容哈希、故内容与文件名必然一致：可长期无条件缓存。 */
+const CACHE_IMMUTABLE = "public, max-age=31536000, immutable";
+
+/**
+ * 压缩产物缓存上限。整棵树的压缩产物约 15 MiB，故实际效果是"全缓存"；
+ * 这道上限只为防将来资源变大时内存无界增长。
+ */
+const COMPRESSED_CACHE_BYTES = 32 * 1024 * 1024;
 
 export interface AssetServerOptions {
   /** 抓取所得的厂商资源根目录。本服务不会写它。 */
@@ -142,10 +164,17 @@ export class AssetServer {
   readonly #log: Logger;
   readonly #relayUrl: string | undefined;
   readonly #patchEntry: boolean;
-  #shellBytes: Buffer | null = null;
+  /** 外壳（已注入 relay 地址）的各编码变体。 */
+  #shell: VariantStore | null = null;
   #entryName: string | null = null;
-  /** 内存中的 patched 入口 bundle。磁盘上的原文件不动。 */
-  #patchedEntry: Buffer | null = null;
+  /**
+   * 内存中的 patched 入口 bundle 及其变体，磁盘上的原文件不动。
+   * 字节与校验符同生同灭，故合成一个对象——分开存会出现
+   * "有字节没指纹"的中间态。
+   */
+  #patched: VariantStore | null = null;
+  /** 磁盘资源的压缩产物缓存。 */
+  readonly #compressed = new CompressedCache(COMPRESSED_CACHE_BYTES);
 
   constructor(options: AssetServerOptions) {
     this.#root = resolve(options.rootDir);
@@ -161,8 +190,10 @@ export class AssetServer {
    * 而不是静默送出未 patch 的 bundle（那会让 SPA 悄悄连回厂商 relay）。
    */
   async prepare(): Promise<PrepareReport> {
-    const shell = await this.#buildShell();
-    this.#shellBytes = shell;
+    const shellStore = await this.#shellStore();
+    // 预热 br：外壳与入口都在首屏关键路径上，把压缩成本挪到接受请求之前。
+    await shellStore.warm("br");
+    const shell = shellStore.identity.body;
     const html = shell.toString("utf8");
 
     const entry = findEntryBundle(html) ?? (await this.#scanForEntry());
@@ -210,14 +241,16 @@ export class AssetServer {
     }
 
     const patched = applyRelayPatch(source);
-    this.#patchedEntry = Buffer.from(patched, "utf8");
+    const store = new VariantStore(Buffer.from(patched, "utf8"), true);
+    await store.warm("br");
+    this.#patched = store;
     return {
       shellBytes: shell.length,
       entryBundle: entry,
       patch: "applied",
       detail:
         `内存 overlay：${String(Buffer.byteLength(source, "utf8"))} → ` +
-        `${String(this.#patchedEntry.length)} 字节（磁盘文件未改动）`,
+        `${String(store.identity.body.length)} 字节（磁盘文件未改动）`,
     };
   }
 
@@ -238,10 +271,33 @@ export class AssetServer {
     return Buffer.from(injectRelayMeta(raw.toString("utf8"), this.#relayUrl), "utf8");
   }
 
+  /**
+   * 外壳的变体集合。构建一次并缓存，请求路径上不重算哈希、不重复压缩。
+   * 外壳内嵌 relay 地址，故不可压性不适用——它总是文本，值得压。
+   */
+  async #shellStore(): Promise<VariantStore> {
+    const cached = this.#shell;
+    if (cached !== null) return cached;
+    const store = new VariantStore(await this.#buildShell(), true);
+    this.#shell = store;
+    return store;
+  }
+
   /** 外壳内容（已注入 relay 地址）。 */
   async shell(): Promise<Buffer> {
-    this.#shellBytes ??= await this.#buildShell();
-    return this.#shellBytes;
+    return (await this.#shellStore()).identity.body;
+  }
+
+  /**
+   * 请求的路径是否为入口 bundle（`assets/index-<hash>.js`）。
+   *
+   * 按文件名形状判断，而不比对 prepare() 探到的那个具体名字：这条不变量
+   * （入口一律回源校验）不应当依赖 prepare() 是否跑过。厂商构建只会产出
+   * 一个入口，即便这里有误判，代价也只是一次条件请求而非缓存命中。
+   */
+  #isEntryPath(relative: string): boolean {
+    if (!relative.startsWith(ASSETS_DIR_SEGMENT)) return false;
+    return ENTRY_BUNDLE.test(relative.slice(ASSETS_DIR_SEGMENT.length));
   }
 
   /**
@@ -300,7 +356,7 @@ export class AssetServer {
     }
 
     if (SHELL_PATHS.has(pathname)) {
-      await this.#sendBuffer(res, "index.html", await this.shell());
+      await this.#sendShell(req, res);
       return;
     }
 
@@ -311,24 +367,21 @@ export class AssetServer {
       : null;
 
     if (relative !== null && relative === "") {
-      await this.#sendBuffer(res, "index.html", await this.shell());
+      await this.#sendShell(req, res);
       return;
     }
 
     // 入口 bundle：送出内存中的 patched 版本
-    if (
-      relative !== null &&
-      this.#entryName !== null &&
-      relative === `${ASSETS_DIR_SEGMENT}${this.#entryName}` &&
-      this.#patchedEntry !== null
-    ) {
-      await this.#sendBuffer(res, relative, this.#patchedEntry, true);
+    const patched = this.#patched;
+    if (relative !== null && this.#isEntryPath(relative) && patched !== null) {
+      const variant = await patched.select(negotiateEncoding(req.headers["accept-encoding"]));
+      await this.#sendBuffer(req, res, relative, variant, CACHE_REVALIDATE, true);
       return;
     }
 
     // 不是 /remote/v4/latest/ 下的路径 → SPA fallback（应用路由）
     if (relative === null) {
-      await this.#sendBuffer(res, "index.html", await this.shell());
+      await this.#sendShell(req, res);
       return;
     }
 
@@ -342,7 +395,7 @@ export class AssetServer {
     }
 
     if (absolute === null) {
-      await this.#sendBuffer(res, "index.html", await this.shell());
+      await this.#sendShell(req, res);
       return;
     }
 
@@ -360,10 +413,33 @@ export class AssetServer {
       return;
     }
 
+    // 走到这里说明入口没有内存 overlay（patch 关闭，或磁盘上已被 patch）。
+    // 后者内容同样与文件名哈希不符，故入口路径一律要求回源校验。
+    const cacheControl = this.#isEntryPath(relative) ? CACHE_REVALIDATE : CACHE_IMMUTABLE;
+    const compressible = isCompressible(relative, info.size);
+    const encoding = compressible
+      ? negotiateEncoding(req.headers["accept-encoding"])
+      : "identity";
+
+    if (encoding !== "identity") {
+      await this.#sendBuffer(
+        req,
+        res,
+        relative,
+        await this.#compressedFile(absolute, relative, encoding),
+        cacheControl,
+        true,
+      );
+      return;
+    }
+
     res.writeHead(200, {
       "content-type": contentTypeFor(relative),
       "content-length": String(info.size),
-      "cache-control": cacheControlFor(relative, false),
+      "cache-control": cacheControl,
+      // 即使这次发的是未压缩内容也要声明：否则共享缓存可能把这份原文
+      // 回给一个明确要求 br 的客户端。
+      ...(compressible ? { vary: "Accept-Encoding" } : {}),
       "x-content-type-options": "nosniff",
     });
     if (req.method === "HEAD") {
@@ -383,8 +459,8 @@ export class AssetServer {
 
   #status(res: ServerResponse): void {
     const patchState =
-      this.#patchedEntry !== null
-        ? `已套用（内存 overlay，磁盘未改动）→ ${String(this.#patchedEntry.length)} 字节`
+      this.#patched !== null
+        ? `已套用（内存 overlay，磁盘未改动）→ ${String(this.#patched.identity.body.length)} 字节`
         : this.#entryName === null
           ? "未找到入口 bundle"
           : "未套用（入口原样送出）";
@@ -412,16 +488,66 @@ export class AssetServer {
     res.end(body);
   }
 
+  /**
+   * 磁盘资源的压缩产物。命中缓存则零成本；否则读一次文件、异步压一次并留住。
+   * 未压缩的变体不入缓存，见 `CompressedCache` 的注释。
+   */
+  async #compressedFile(
+    absolute: string,
+    relative: string,
+    encoding: ContentEncoding,
+  ): Promise<Variant> {
+    const key = `${encoding}|${relative}`;
+    const cached = this.#compressed.get(key);
+    if (cached !== undefined) return cached;
+
+    const variant = await variantFor(encoding, await readFile(absolute));
+    this.#compressed.set(key, variant);
+    return variant;
+  }
+
+  /** 送出外壳。四个入口路径与 SPA fallback 都走这里，协商与校验也在此统一处理。 */
+  async #sendShell(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const store = await this.#shellStore();
+    const variant = await store.select(negotiateEncoding(req.headers["accept-encoding"]));
+    await this.#sendBuffer(req, res, "index.html", variant, CACHE_REVALIDATE, true);
+  }
+
+  /**
+   * 送出内存里的某个表示，并处理条件请求。
+   *
+   * 命中 If-None-Match 时回 304 且不带正文——这正是 no-cache 的价值所在：
+   * 浏览器留着副本，只用一次条件请求确认，无需重下整个入口 bundle。
+   *
+   * 校验符属于**该表示**（br 与 identity 的 ETag 不同），故必须先用协商结果
+   * 选出变体、再比对指纹，顺序不能反。
+   */
   async #sendBuffer(
+    req: IncomingMessage,
     res: ServerResponse,
     relative: string,
-    body: Buffer,
-    isPatchedEntry = false,
+    variant: Variant,
+    cacheControl: string,
+    vary: boolean,
   ): Promise<void> {
+    const { body, encoding, etag } = variant;
+    // 声明 Vary 后，共享缓存才不会把这份表示回给不接受该编码的客户端。
+    const negotiated = vary ? { vary: "Accept-Encoding" } : {};
+
+    if (etagMatches(req.headers["if-none-match"], etag)) {
+      // 304 不带正文，但必须回 ETag 与 Cache-Control，
+      // 否则浏览器无法把这次命中与已存的副本关联起来。
+      res.writeHead(304, { etag, "cache-control": cacheControl, ...negotiated });
+      res.end();
+      return;
+    }
     res.writeHead(200, {
       "content-type": contentTypeFor(relative),
       "content-length": String(body.length),
-      "cache-control": cacheControlFor(relative, isPatchedEntry),
+      "cache-control": cacheControl,
+      ...(encoding === null ? {} : { "content-encoding": encoding }),
+      ...negotiated,
+      etag,
       "x-content-type-options": "nosniff",
     });
     res.end(body);

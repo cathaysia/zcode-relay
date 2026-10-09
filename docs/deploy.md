@@ -111,7 +111,8 @@ just serve 10.8.0.1 18899 /srv/zcode-relay/vendor-assets https://zcode.internal
 3. **与重新抓取冲突**——重抓会覆盖 patch，或让工具误判"已存在"而跳过。
 4. **入口 bundle 的缓存头必须变**——内容已与文件名里的哈希不符，不能再宣称
    `immutable`（否则浏览器把打过补丁的版本钉住一年，将来换 relay 地址无法更新）。
-   overlay 方案能精确地只对这个文件用 `no-store`。
+   overlay 方案能精确地只对这个文件用 `no-cache` 加一个强 ETag：浏览器留副本，
+   但复用前回源校验一次，未变时回 304——重复访问的流量从整个入口降到一次条件请求。
 
 若你打算用 nginx 之类的静态服务器而不是内置的 asset server，则需要一份落在磁盘上的
 patch 产物：
@@ -194,8 +195,19 @@ curl -s http://127.0.0.1:18899/
 # 外壳，并确认 relay 地址已注入
 curl -s http://127.0.0.1:18899/remote/v4 | grep -o 'zcode-relay-ws[^>]*'
 
-# 入口 bundle，确认类型与缓存头
+# 入口 bundle，确认类型与缓存头（应为 no-cache 且带 ETag，不应是 immutable）
 curl -sI http://127.0.0.1:18899/remote/v4/latest/assets/index-<hash>.js
+
+# 缓存协商是否生效：第二条命令应回 304 且不带正文
+ET=$(curl -sI http://127.0.0.1:18899/remote/v4/latest/assets/index-<hash>.js \
+     | sed -n 's/^[Ee][Tt]ag: *//p' | tr -d '\r')
+curl -sI -H "If-None-Match: $ET" \
+     http://127.0.0.1:18899/remote/v4/latest/assets/index-<hash>.js | head -1
+
+# 压缩是否生效：应看到 content-encoding: br，且 content-length 只有原来的约四分之一
+curl -sI -H 'Accept-Encoding: br' \
+     http://127.0.0.1:18899/remote/v4/latest/assets/index-<hash>.js \
+     | grep -i -E 'content-encoding|content-length|vary'
 
 # relay 是否可用（应先跑通协议核对工具）
 just echo-relay 127.0.0.1 18899

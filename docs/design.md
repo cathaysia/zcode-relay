@@ -80,7 +80,7 @@ Web 端 relay 地址硬编码（`overrideUrl: void 0`），因此"终端如何�
 | `patch-tool` | 提取、patch、漂移检测 SPA 资源 | 厂商资源 → 自托管资源 |
 | `asset-server` | 静态托管 patched SPA | HTTP → 资源 |
 
-模块到文件的映射：`ws-acceptor` → `src/relay/server.ts`；`authenticator`、`pairing`、`router`、`heartbeat` 与 `session-registry` → `src/relay/relay.ts` 与 `src/relay/registry.ts`；`Conn` 抽象 → `src/relay/conn.ts`。`patch-tool` 与 `asset-server` 尚未实现。
+模块到文件的映射：`ws-acceptor` → `src/relay/server.ts`；`authenticator`、`pairing`、`router`、`heartbeat` 与 `session-registry` → `src/relay/relay.ts` 与 `src/relay/registry.ts`；`Conn` 抽象 → `src/relay/conn.ts`；`patch-tool` → `src/tools/*`；`asset-server` → `src/assets/server.ts`（内容协商与压缩在 `src/assets/encoding.ts`，校验符在 `src/assets/validators.ts`）。
 
 **为什么把 relay 做成"笨管道"**：协议本身不带版本协商，`payload` 内部 schema 会随厂商升级而变，且应用层已有自己的分片、校验、ack 与降级机制。relay 若试图理解或规范化 `payload`，就会在厂商升级时成为故障点，并可能改写桥接身份三元组导致桥接永久降级。代价是 relay 无法做内容层面的过滤或审计——这对本项目的目标（内容不经第三方）无影响，因为 relay 与消费方同属自有控制域；若将来需要审计，正确的位置是终端侧解密之后，而非 relay。
 
@@ -94,6 +94,17 @@ Web 端 relay 地址硬编码（`overrideUrl: void 0`），因此"终端如何�
 4. **`error.code` 只用协议定义的五个**。两侧把未知 code 视为致命且不重连。
 
 完整消息目录、状态机、定时器常数、分片规则与边界情况见 `protocol.md`。
+
+**asset-server 的托管不变式**（与 relay 无关，但同样是"照证据定、别照直觉定"的部分）：
+
+1. **入口 bundle 一律回源校验**。它在内存里被 patch 过，内容已与文件名里的哈希不符，因此不得发 `immutable`（会把旧 relay 地址钉死一年），也不宜发 `no-store`（会让浏览器每次页面加载都重下整个入口，实测 4.6 MiB）。正确做法是 `no-cache` 加强 ETag：浏览器留副本、复用前回源校验一次、未变时回 304。是否命中按文件名形状（`assets/index-<hash>.js`）判定，而非 `prepare()` 探到的那个具体名字，以免这条不变量依赖调用顺序。
+2. **磁盘流式发送必须用 `stream.pipeline`，不用 `pipe`**。客户端中途断开时 `pipe` 只会 unpipe 并暂停源流，既不销毁它、也不触发 autoClose，于是每个中断请求永久泄漏一个文件 fd（实测 12 次中断泄漏 12 个，约两百次即 EMFILE）。`pipeline` 在任一端结束或出错时销毁全部流。回归测试见 `test/assets-abort.test.ts`。
+3. **外壳与入口是内存缓冲，不参与流式路径**，因此上述 fd 风险只存在于那约 2500 个静态 chunk 上。
+4. **压缩一律走 zlib 的异步接口，绝不用 `*Sync`**。relay 的帧转发与 asset server 同进程同事件循环，同步压入口那 4.6 MiB 会把这段时间的所有 WS 帧卡住。实测异步压一个 2.05 MiB 的 chunk 期间事件循环最大阻塞 2.0 ms，而同样内容同步压约需 25 ms。
+5. **压缩的产物随表示变化**。br 与 identity 是同一资源的两种表示，故 ETag 必须按实际送出的字节计算，否则 304 会把 br 的指纹配到 identity 的字节上（`src/assets/validators.ts` 的 `strongEtag`）。凡是可能被压缩的资源都要声明 `Vary: Accept-Encoding`，**包括这次发的是原文的情况**，否则共享缓存可能把原文回给明确要求 br 的客户端。
+6. **只压文本类且达阈值的资源**（`src/assets/encoding.ts` 的 `isCompressible`）。PNG/MP3/woff2 已是压缩格式，wasm 是二进制且单文件最大 4 MiB；树里约两千个几百字节的图标 chunk 由 1 KiB 阈值挡住。门槛按扩展名而非"内容可不可压"，否则每压一个文件都要先试一次。
+
+实测收益（2026-10-09 抓取的构建）：首屏那 84 个资源合计 8.11 MiB，经 br 后 1.94 MiB，省 76%；入口 bundle 4,821,644 → 1,130,750 字节，解压后与 identity 逐字节一致。外壳与入口在 `prepare()` 时预热 br，故请求路径上是零压缩开销。
 
 ## 4. 可视化
 
