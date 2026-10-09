@@ -32,10 +32,39 @@ patch-apply input output:
 fetch-assets outdir *args:
     node src/tools/fetch-assets.ts {{outdir}} {{args}}
 
-# 单端口部署：同端口提供 SPA 资源与 relay WebSocket
+# 启动服务并自动在资源缺失时抓取；若在 macOS 下支持一键打开桌面端
+up host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="" app="true":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "{{assetsdir}}/index.html" ]; then
+        echo "==> 检测到资源目录 {{assetsdir}} 未抓取，开始自动抓取 SPA 静态资源..."
+        node src/tools/fetch-assets.ts {{assetsdir}}
+    fi
+    export ZCODE_RELAY_HOST={{host}}
+    export ZCODE_RELAY_PORT={{port}}
+    export ZCODE_ASSETS_DIR={{assetsdir}}
+    export ZCODE_PUBLIC_ORIGIN={{origin}}
+    DERIVED_ORIGIN="${origin:-http://${host}:${port}}"
+    RELAY_WS="${DERIVED_ORIGIN/http/ws}/ws"
+    if [ "{{app}}" = "true" ] && [ "$(uname)" = "Darwin" ] && [ -d "/Applications/ZCode.app" ]; then
+        (
+            sleep 1
+            echo "==> 正在启动 macOS 桌面端 ZCode 并注入自托管 relay 环境..."
+            export ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL="${RELAY_WS}"
+            export ZCODE_WEB_REMOTE_CONTROL_URL="${DERIVED_ORIGIN}/remote/v4"
+            open -a "/Applications/ZCode.app"
+        ) &
+    fi
+    exec node src/serve/main.ts
+
+# 单端口部署：同端口提供 SPA 资源与 relay WebSocket（资源缺失时自动抓取）
 serve host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="":
     #!/usr/bin/env bash
     set -euo pipefail
+    if [ ! -f "{{assetsdir}}/index.html" ]; then
+        echo "==> 检测到资源目录 {{assetsdir}} 未就绪，自动执行抓取..."
+        node src/tools/fetch-assets.ts {{assetsdir}}
+    fi
     export ZCODE_RELAY_HOST={{host}}
     export ZCODE_RELAY_PORT={{port}}
     export ZCODE_ASSETS_DIR={{assetsdir}}

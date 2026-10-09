@@ -125,13 +125,27 @@ just patch-apply ./vendor-assets/assets/index-<hash>.js ./patched/index-<hash>.j
 
 ### 2.4 配置桌面端
 
-编辑 `~/.local/share/applications/zcode.desktop`，在 `Exec` 前加 `env`：
+**Linux**：编辑 `~/.local/share/applications/zcode.desktop`，在 `Exec` 前加 `env`：
 
 ```ini
 Exec=env \
   ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://zcode.internal/ws \
   ZCODE_WEB_REMOTE_CONTROL_URL=https://zcode.internal/remote/v4 \
   /opt/ZCode/zcode %U
+```
+
+**macOS**：通过终端启动或写入环境（macOS 应用默认不读取 shell 配置文件）：
+
+```sh
+# 方式 A：终端直接通过 open 传入环境变量
+export ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://zcode.internal/ws
+export ZCODE_WEB_REMOTE_CONTROL_URL=https://zcode.internal/remote/v4
+open -a "/Applications/ZCode.app"
+
+# 方式 B：直接执行可执行文件（排查时推荐，能看到所有标准输出）
+ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://zcode.internal/ws \
+ZCODE_WEB_REMOTE_CONTROL_URL=https://zcode.internal/remote/v4 \
+/Applications/ZCode.app/Contents/MacOS/ZCode
 ```
 
 两个变量分工不同，缺一不可：
@@ -170,8 +184,9 @@ https://zcode.internal/remote/v4?sid=<device_sid>&hash=<pass_hash>&t=<ts>
 ## 4. 自检清单
 
 ```sh
-# 端口在听
-ss -tlnp | grep 18899
+# 端口在听（Linux: ss，macOS: lsof）
+ss -tlnp | grep 18899              # Linux
+lsof -iTCP:18899 -sTCP:LISTEN      # macOS
 
 # 状态页（会打印资源根目录与端点）
 curl -s http://127.0.0.1:18899/

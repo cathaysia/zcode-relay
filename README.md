@@ -43,25 +43,45 @@
 和 relay 放进**同一进程、同一端口**（`src/serve/main.ts`），所以只需一张证书、
 一个端口。完整部署步骤见 [docs/deploy.md](docs/deploy.md)。
 
-三条命令：
+一键启动（自动按需抓取资源并启动服务；macOS 下同时带环境唤起桌面端）：
+
+```sh
+just up
+# 或指定网络参数：
+# just up 10.8.0.1 18899 ./vendor-assets https://zcode.internal
+```
+
+如果使用 `just serve`，当检测到未抓取静态资源时也会**自动先抓取再启动**。
+
+三条底层命令（细粒度控制）：
 
 ```sh
 just fetch-assets ./vendor-assets             # 抓资源（只读，不改写任何文件）
 just serve 10.8.0.1 18899 ./vendor-assets https://zcode.internal
-# 按启动时打印的配置改桌面端 .desktop，重启 ZCode，开「Web 远程控制」，扫码
+# 启动服务（同端口托管 SPA 与 Relay WebSocket）
 ```
 
 `serve` 会在启动前完成预检并把 relay patch 套在**内存 overlay** 上——磁盘上的
 厂商资源始终是原始镜像，`manifest.json` 的 sha256 始终可校验。**预检不通过时
 拒绝启动**，避免 SPA 悄悄连回厂商 relay 而你以为自托管成功了。
 
-启动报告会直接打印可粘贴的桌面端配置：
+启动报告会直接根据操作系统打印可粘贴的桌面端配置：
 
+**Linux (`~/.local/share/applications/zcode.desktop`):**
 ```
 Exec=env \
   ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://zcode.internal/ws \
   ZCODE_WEB_REMOTE_CONTROL_URL=https://zcode.internal/remote/v4 \
   /opt/ZCode/zcode %U
+```
+
+**macOS (终端启动 / 脚本 / `~/.zshrc`):**
+```sh
+export ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://zcode.internal/ws
+export ZCODE_WEB_REMOTE_CONTROL_URL=https://zcode.internal/remote/v4
+open -a "/Applications/ZCode.app"
+# 或直接运行二进制：
+# ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=... ZCODE_WEB_REMOTE_CONTROL_URL=... /Applications/ZCode.app/Contents/MacOS/ZCode
 ```
 
 relay 地址由服务端自动注入外壳的 meta 标签，不需要手改 HTML。
@@ -70,19 +90,26 @@ relay 地址由服务端自动注入外壳的 meta 标签，不需要手改 HTML
 
 ```sh
 just install
-just test      # 42 个用例
+just test      # 95 个用例
 just lint      # 类型检查（Node 的类型擦除不做检查，故单独一道）
 
 # 启动 relay（默认 127.0.0.1:18899；部署时应改为 VPN 接口地址）
 just relay <vpn-ip> 18899
 ```
 
-设备端配置（`~/.local/share/applications/zcode.desktop` 的 `Exec` 前加 `env`）：
+设备端配置：
 
-```
-ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://<你的地址>:18899/ws
-ZCODE_WEB_REMOTE_CONTROL_URL=https://<你的地址>/remote/v4
-```
+- **Linux**（`~/.local/share/applications/zcode.desktop` 的 `Exec` 前加 `env`）：
+  ```
+  ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://<你的地址>:18899/ws
+  ZCODE_WEB_REMOTE_CONTROL_URL=https://<你的地址>/remote/v4
+  ```
+- **macOS**（终端启动或写入环境）：
+  ```sh
+  export ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=wss://<你的地址>:18899/ws
+  export ZCODE_WEB_REMOTE_CONTROL_URL=https://<你的地址>/remote/v4
+  open -a "/Applications/ZCode.app"
+  ```
 
 ## 先验证再联调
 
@@ -92,8 +119,10 @@ ZCODE_WEB_REMOTE_CONTROL_URL=https://<你的地址>/remote/v4
 
 ```sh
 just echo-relay 127.0.0.1 18899
-# 另一个终端：
+# 另一个终端（Linux）：
 ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:18899/ws /opt/ZCode/zcode
+# 另一个终端（macOS）：
+ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:18899/ws /Applications/ZCode.app/Contents/MacOS/ZCode
 # 然后在界面里开启「Web 远程控制」
 ```
 

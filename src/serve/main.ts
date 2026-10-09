@@ -27,6 +27,7 @@ import { WebSocketServer } from "ws";
 import { AssetServer, type PrepareReport } from "../assets/server.ts";
 import { RelayCore, type Logger } from "../relay/relay.ts";
 import { acceptConnections, WS_MAX_PAYLOAD } from "../relay/accept.ts";
+import { getPlatformConfigGuide } from "../platform.ts";
 
 const logger: Logger = {
   info(message, fields) {
@@ -161,16 +162,15 @@ await new Promise<void>((resolve, reject) => {
   httpServer.listen(port, host, resolve);
 });
 
+const guide = getPlatformConfigGuide({ relayUrl, derivedOrigin, port });
+
 console.log("");
 console.log(THIN);
-console.log("第 1 步：让桌面端连到这里");
+console.log(`第 1 步：让桌面端连到这里 (${guide.osName})`);
 console.log(THIN);
-console.log("编辑 ~/.local/share/applications/zcode.desktop，把 Exec 改为：");
+console.log(guide.configInstruction);
 console.log("");
-console.log("  Exec=env \\");
-console.log(`    ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=${relayUrl} \\`);
-console.log(`    ZCODE_WEB_REMOTE_CONTROL_URL=${derivedOrigin}/remote/v4 \\`);
-console.log("    /opt/ZCode/zcode %U");
+console.log(guide.configExample);
 console.log("");
 console.log("重启 ZCode 后，在界面里开启「Web 远程控制」。");
 console.log("");
@@ -191,7 +191,7 @@ console.log("自检");
 console.log(THIN);
 console.log(`  状态页   ${derivedOrigin}/`);
 console.log(`  资源     curl -I ${derivedOrigin}/remote/v4/latest/`);
-console.log(`  端口     ss -tlnp | grep ${String(port)}`);
+console.log(`  端口     ${guide.portCheckCommand}`);
 console.log(LINE);
 
 if (host === "0.0.0.0" || host === "::") {

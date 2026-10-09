@@ -20,6 +20,7 @@
 import { RelayServer } from "../relay/server.ts";
 import type { FrameTap } from "../relay/conn.ts";
 import type { Logger } from "../relay/relay.ts";
+import { getPlatformConfigGuide } from "../platform.ts";
 
 const SHOW_SECRETS = process.env["ZCODE_ECHO_SHOW_SECRETS"] === "1";
 
@@ -143,15 +144,21 @@ const path = process.env["ZCODE_RELAY_PATH"]?.trim() ?? "/ws";
 const server = new RelayServer({ host, port, path, logger, tap });
 const address = await server.listen();
 
+const wsFullUrl = `ws://${address.address === "0.0.0.0" ? "127.0.0.1" : address.address}:${address.port}${path}`;
+const echoGuide = getPlatformConfigGuide({
+  relayUrl: wsFullUrl,
+  derivedOrigin: `http://127.0.0.1:${address.port}`,
+  port: address.port,
+});
+
 console.log("=".repeat(78));
 console.log("ZCode relay 协议核对工具");
 console.log("=".repeat(78));
 console.log(`监听: ws://${address.address}:${address.port}${path}`);
 console.log("");
-console.log("在另一个终端启动桌面端，让它连到这里：");
+console.log(`在另一个终端启动桌面端 (${echoGuide.osName})，让它连到这里：`);
 console.log("");
-console.log(`  ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL=ws://127.0.0.1:${address.port}${path} \\`);
-console.log("    /opt/ZCode/zcode");
+console.log(echoGuide.launchExample);
 console.log("");
 console.log("然后在 ZCode 界面里开启「Web 远程控制」。");
 console.log("本工具会打印设备实际发出的报文，并用捕获的 pass_hash 校验它的 proof。");
