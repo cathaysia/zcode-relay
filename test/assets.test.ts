@@ -5,12 +5,11 @@ import {
   assertNotEquals,
   assertStringIncludes,
 } from "@std/assert";
-import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
 import * as posix from "@std/path/posix";
 
 import { AssetProvider, findEntryBundle, injectRelayMeta } from "../src/assets/provider.ts";
 import { classifyRoute } from "../src/assets/routes.ts";
-import { etagMatches, strongEtag } from "../src/assets/validators.ts";
 import { OVERRIDE_EXPRESSION } from "../src/tools/patch-spa.ts";
 import { settleEventLoop } from "./helpers/settle.ts";
 import {
@@ -108,27 +107,6 @@ Deno.test("findEntryBundle 找不到时返回 null", () => {
   assertEquals(findEntryBundle("<html></html>"), null);
 });
 
-Deno.test("strongEtag 随内容变化且跨调用稳定", async () => {
-  const a = await strongEtag(new TextEncoder().encode("同一份内容"));
-  assertEquals(
-    a,
-    await strongEtag(new TextEncoder().encode("同一份内容")),
-    "同一内容必须得到同一指纹",
-  );
-  assertNotEquals(a, await strongEtag(new TextEncoder().encode("换了一份内容")));
-  assertMatch(a, /^"[A-Za-z0-9_-]+"$/, "必须是带引号的强 ETag");
-});
-
-Deno.test("etagMatches 按 RFC 9110 做弱比较", () => {
-  const etag = '"abc123"';
-  assertEquals(etagMatches(undefined, etag), false);
-  assertEquals(etagMatches(etag, etag), true);
-  assertEquals(etagMatches(`W/${etag}`, etag), true, "客户端可回弱校验符");
-  assertEquals(etagMatches("*", etag), true);
-  assertEquals(etagMatches(`"other", ${etag}`, etag), true, "支持逗号分隔的列表");
-  assertEquals(etagMatches('"other"', etag), false);
-});
-
 Deno.test("路径表：外壳、资源与 404 三种结局", () => {
   for (const path of ["/remote/v4", "/remote/v4/", "/remote/v4/latest", "/remote/v4/latest/"]) {
     assertEquals(classifyRoute(path).kind, "shell", `${path} 应回外壳`);
@@ -169,6 +147,21 @@ Deno.test("锚点不匹配时 prepare 报告 failed 而不静默继续", async (
     const report = await provider.prepare();
     assertEquals(report.patch, "failed");
     assertMatch(report.detail, /docs\/patching\.md/);
+  });
+});
+
+Deno.test("外壳引用但磁盘缺失入口时 prepare 报告 failed 而非抛原始 OS 错误", async () => {
+  // 残缺的资源目录（有外壳、无入口，如抓取中断）：serve 应打出带重抓指引的
+  // 预检面板，而不是 `No such file or directory` 一行。
+  await withRoot(async (root) => {
+    await Deno.mkdir(posix.join(root, "assets"), { recursive: true });
+    await Deno.writeTextFile(posix.join(root, "index.html"), SHELL);
+    const provider = new AssetProvider({ rootDir: root, relayUrl: RELAY_URL });
+    const report = await provider.prepare();
+    assertEquals(report.patch, "failed");
+    assertEquals(report.entryBundle, ENTRY_NAME);
+    assertMatch(report.detail, /fetch-assets/);
+    assertMatch(report.detail, /<资源目录>\/assets\/\*/);
   });
 });
 
@@ -412,18 +405,18 @@ Deno.test("HEAD 请求返回头部但无正文", async () => {
   });
 });
 
-Deno.test("HEAD 对压缩表示给出压缩后的长度", async () => {
+Deno.test("HEAD 不压缩，只回原文的头部", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
     const res = await inject(app, {
       method: "HEAD",
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
-      headers: { "accept-encoding": "br" },
+      headers: { "accept-encoding": "gzip" },
     });
     assertEquals(res.statusCode, 200);
-    assertEquals(header(res, "content-encoding"), "br");
-    const length = Number(header(res, "content-length"));
-    assert(length > 0 && length < BIG_CHUNK_CONTENT.length, `长度应是压缩后的: ${length}`);
+    // 中间件对 HEAD 跳过压缩：长度是原文长度，且无 content-encoding
+    assertEquals(res.headers["content-encoding"], undefined);
+    assertEquals(Number(header(res, "content-length")), BIG_CHUNK_CONTENT.length);
     assertEquals(res.body, "");
   });
 });
@@ -513,28 +506,8 @@ Deno.test("非 GET/HEAD 方法返回 405", async () => {
 // ---------- 内容协商与压缩 ----------
 //
 // 用 app.request 的 inject 兼容层（而不是 fetch）：fetch 会自动解压，看不到
-// "服务端真的发了 br"以及压缩后的字节数。
-
-Deno.test("可压缩资源在客户端接受 br 时返回 br", async () => {
-  await withFixture(async ({ app, provider }) => {
-    await provider.prepare();
-    const res = await inject(app, {
-      url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
-      headers: { "accept-encoding": "gzip, deflate, br" },
-    });
-
-    assertEquals(res.statusCode, 200);
-    assertEquals(header(res, "content-encoding"), "br");
-    assertEquals(header(res, "vary"), "Accept-Encoding");
-    assertEquals(
-      Number(header(res, "content-length")),
-      res.rawPayload.byteLength,
-      "长度须是压缩后的长度",
-    );
-    assert(res.rawPayload.byteLength < BIG_CHUNK_CONTENT.length, "压缩后应更小");
-    assertEquals(utf8(new Uint8Array(brotliDecompressSync(res.rawPayload))), BIG_CHUNK_CONTENT);
-  });
-});
+// "服务端真的发了 gzip"以及压缩后的字节数。协商与 ETag 由 Hono 内置中间件
+// 承担：只支持 gzip/deflate，不支持 br；ETag 按最终字节生成，304 由中间件回。
 
 Deno.test("只接受 gzip 时用 gzip", async () => {
   await withFixture(async ({ app, provider }) => {
@@ -543,8 +516,31 @@ Deno.test("只接受 gzip 时用 gzip", async () => {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
       headers: { "accept-encoding": "gzip, deflate" },
     });
+
+    assertEquals(res.statusCode, 200);
     assertEquals(header(res, "content-encoding"), "gzip");
+    assertEquals(header(res, "vary"), "Accept-Encoding");
+    assert(res.rawPayload.byteLength < BIG_CHUNK_CONTENT.length, "压缩后应更小");
     assertEquals(utf8(new Uint8Array(gunzipSync(res.rawPayload))), BIG_CHUNK_CONTENT);
+  });
+});
+
+Deno.test("只接受 br 时回原文（中间件不支持 br）", async () => {
+  await withFixture(async ({ app, provider }) => {
+    await provider.prepare();
+    const res = await inject(app, {
+      url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
+      headers: { "accept-encoding": "br" },
+    });
+
+    assertEquals(res.statusCode, 200);
+    assertEquals(res.headers["content-encoding"], undefined);
+    assertEquals(
+      header(res, "vary"),
+      "Accept-Encoding",
+      "缺了 Vary，共享缓存会把这份原文回给明确要求 gzip 的客户端",
+    );
+    assertEquals(res.body, BIG_CHUNK_CONTENT);
   });
 });
 
@@ -559,7 +555,7 @@ Deno.test("不接受任何编码时发原文，但仍声明 Vary", async () => {
     assertEquals(
       header(res, "vary"),
       "Accept-Encoding",
-      "缺了 Vary，共享缓存会把这份原文回给明确要求 br 的客户端",
+      "缺了 Vary，共享缓存会把这份原文回给明确要求 gzip 的客户端",
     );
     assertEquals(res.body, BIG_CHUNK_CONTENT);
   });
@@ -570,10 +566,10 @@ Deno.test("已压缩格式不做二次压缩", async () => {
     await provider.prepare();
     const res = await inject(app, {
       url: `/remote/v4/latest/assets/${PNG_NAME}`,
-      headers: { "accept-encoding": "br" },
+      headers: { "accept-encoding": "gzip" },
     });
     assertEquals(res.statusCode, 200);
-    // 夹具内容是全零、压缩比极高；若按"可压性"判断就会误压，故这里验的是按扩展名判断
+    // image/png 不在中间件的默认可压类型表里，故不压
     assertEquals(res.headers["content-encoding"], undefined, "PNG 不该被压缩");
     assertEquals(res.headers["vary"], undefined, "不会被压的资源无需声明 Vary");
   });
@@ -584,25 +580,25 @@ Deno.test("小于阈值的资源不压", async () => {
     await provider.prepare();
     const res = await inject(app, {
       url: `/remote/v4/latest/assets/${CHUNK_NAME}`,
-      headers: { "accept-encoding": "br" },
+      headers: { "accept-encoding": "gzip" },
     });
     assertEquals(header(res, "content-encoding"), "", "几百字节的资源压了可能更大");
   });
 });
 
-Deno.test("br 表示有自己的校验符，用它协商回 304", async () => {
+Deno.test("gzip 表示有自己的校验符，用它协商回 304", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const br = await inject(app, {
+    const gzipped = await inject(app, {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
-      headers: { "accept-encoding": "br" },
+      headers: { "accept-encoding": "gzip" },
     });
-    const etag = header(br, "etag");
+    const etag = header(gzipped, "etag");
     assert(etag, "压缩表示也应有校验符");
 
     const again = await inject(app, {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
-      headers: { "accept-encoding": "br", "if-none-match": etag },
+      headers: { "accept-encoding": "gzip", "if-none-match": etag },
     });
     assertEquals(again.statusCode, 304);
     assertEquals(again.rawPayload.byteLength, 0);
@@ -616,23 +612,23 @@ Deno.test("外壳（内存路径）同样按编码协商，且各有自己的校
       url: "/remote/v4/latest/",
       headers: { "accept-encoding": "identity" },
     });
-    const br = await inject(app, {
+    const gzipped = await inject(app, {
       url: "/remote/v4/latest/",
-      headers: { "accept-encoding": "br" },
+      headers: { "accept-encoding": "gzip" },
     });
 
     assertEquals(identity.headers["content-encoding"], undefined);
-    assertEquals(header(br, "content-encoding"), "br");
-    assert(br.rawPayload.byteLength < identity.rawPayload.byteLength);
+    assertEquals(header(gzipped, "content-encoding"), "gzip");
+    assert(gzipped.rawPayload.byteLength < identity.rawPayload.byteLength);
     assertNotEquals(
-      header(br, "etag"),
+      header(gzipped, "etag"),
       header(identity, "etag"),
-      "br 与 identity 是不同表示，强校验符必须不同，否则 304 会串表示",
+      "gzip 与 identity 是不同表示，校验符必须不同，否则 304 会串表示",
     );
 
     const again = await inject(app, {
       url: "/remote/v4/latest/",
-      headers: { "accept-encoding": "br", "if-none-match": header(br, "etag") },
+      headers: { "accept-encoding": "gzip", "if-none-match": header(gzipped, "etag") },
     });
     assertEquals(again.statusCode, 304);
   });

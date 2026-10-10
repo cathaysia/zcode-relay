@@ -58,13 +58,17 @@ It is not a fork of ZCode; it speaks the wire protocol documented in
 - Hono owns transport mechanics: routing, method dispatch, HEAD handling,
   404/405, request/response plumbing, and stream teardown when a
   client aborts (via `Response` body cancellation).
-- These are domain decisions and MUST NOT be delegated to static/compression
-  helpers: cache policy per resource class, per-representation ETags, the
-  `Vary` scope, and which resources may be compressed at all. The reasons are
-  recorded as the asset-server invariants in `docs/design.md` §3.
-- Content negotiation MUST keep "an explicitly listed encoding wins over `*`"
-  (RFC 9110 §12.5.3). Generic accept-negotiators that select `br` for
-  `br;q=0, *` MUST NOT be used.
+- Content negotiation and conditional requests ARE delegated to Hono's
+  built-in middleware (`hono/compress` for gzip, `hono/etag` for ETags and
+  304), scoped to the `/remote/v4` subtree. Known trade-offs of this
+  delegation, accepted deliberately: no brotli (larger payloads than the old
+  custom br path), per-request hashing instead of precomputed validators, and
+  the middleware's content-type gate instead of extension-based gating.
+- These stay domain decisions in this repo and MUST NOT be delegated:
+  cache policy per resource class, the in-memory entry overlay, path
+  traversal handling, and never serving a patched entry bundle as `immutable`.
+  The reasons are recorded as the asset-server invariants in `docs/design.md`
+  §3.
 - Path routing MUST derive the filesystem path from the URL pathname after URL
   normalization (see `classifyRoute` in `src/assets/routes.ts`), not from the
   router's decoded wildcard parameter.

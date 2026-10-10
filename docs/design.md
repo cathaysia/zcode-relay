@@ -78,12 +78,12 @@ Web 端 relay 地址硬编码（`overrideUrl: void 0`），因此"终端如何�
 | `router` | 同会话内设备与终端之间原样转发 `data` | 载荷 → 对端载荷 |
 | `heartbeat` | 应答 `pair_status_query` | 查询 → `pair_status_ack` |
 | `patch-tool` | 提取、patch、漂移检测 SPA 资源 | 厂商资源 → 自托管资源 |
-| `asset-provider` | 静态托管的**策略**：内容协商、按表示的校验符、入口内存 overlay、路径越界判定 | 请求路径 → 该发哪份字节 |
+| `asset-provider` | 静态托管的**策略**：入口内存 overlay、路径越界判定、按资源类的缓存策略 | 请求路径 → 该发哪份字节 |
 | `http-front` | 传输**机制**：路由、方法分派、HEAD、404/405、流式响应与中断清理（Hono + `Deno.serve` 的 `Response`） | HTTP → 资源 |
 
-模块到文件的映射：`ws-acceptor` → `src/relay/accept.ts`、`src/relay/routes.ts`（Hono 路由）与 `src/relay/server.ts`（独立模式的监听）；`authenticator`、`pairing`、`router`、`heartbeat` 与 `session-registry` → `src/relay/relay.ts` 与 `src/relay/registry.ts`；`Conn` 抽象 → `src/relay/conn.ts`；`patch-tool` → `src/tools/*`；`asset-provider` → `src/assets/provider.ts`（内容协商与压缩在 `src/assets/encoding.ts`，校验符在 `src/assets/validators.ts`）；`http-front` → `src/assets/routes.ts`。单端口部署在 `src/serve/main.ts`：一个 Hono 实例同时注册两侧路由。
+模块到文件的映射：`ws-acceptor` → `src/relay/accept.ts`、`src/relay/routes.ts`（Hono 路由）与 `src/relay/server.ts`（独立模式的监听）；`authenticator`、`pairing`、`router`、`heartbeat` 与 `session-registry` → `src/relay/relay.ts` 与 `src/relay/registry.ts`；`Conn` 抽象 → `src/relay/conn.ts`；`patch-tool` → `src/tools/*`；`asset-provider` → `src/assets/provider.ts`；`http-front` → `src/assets/routes.ts`（内容协商与 ETag 由 `hono/compress` / `hono/etag` 中间件承担）。单端口部署在 `src/serve/main.ts`：一个 Hono 实例同时注册两侧路由。
 
-**运行时是 Deno，HTTP 与 WS 都跑在 Hono 上**（`hono` + `@hono/deno` 的 `upgradeWebSocket`，底层是 Deno 原生 WebSocket）。分工的口径是"机制归框架、语义归本仓库"：路由、方法分派、HEAD、404/405、请求响应管道、客户端中断时的流取消都交给 Hono + `Deno.serve` 的 `Response` 机制；而缓存策略、按表示计算的校验符、`Vary` 的范围、哪些资源可压，都是照证据定下的领域判断，绝不交给静态文件或压缩中间件代劳（理由就是下面那组托管不变式）。同理，内容协商仍用自己那份（`src/assets/encoding.ts`，有实测对照）：通用 negotiator 在 `br;q=0, *` 上会选中 br，与 RFC 9110 §12.5.3 的"显式列出者优先于通配符"相悖。
+**运行时是 Deno，HTTP 与 WS 都跑在 Hono 上**（`hono` + `@hono/deno` 的 `upgradeWebSocket`，底层是 Deno 原生 WebSocket）。分工的口径是"机制归框架、语义归本仓库"：路由、方法分派、HEAD、404/405、请求响应管道、客户端中断时的流取消、内容协商（`hono/compress` 的 gzip）与条件请求（`hono/etag` 的 ETag + 304）都交给 Hono 中间件；而缓存策略、入口内存 overlay、路径越界判定仍是照证据定下的领域判断，留在本仓库（理由就是下面那组托管不变式）。有意接受的代价：中间件只支持 gzip/deflate（无 br，首屏体积大于旧的自研 br 路径）、ETag 按请求实时计算（无预热缓存）、可压判断按内容类型而非扩展名。
 
 **为什么把 relay 做成"笨管道"**：协议本身不带版本协商，`payload` 内部 schema 会随厂商升级而变，且应用层已有自己的分片、校验、ack 与降级机制。relay 若试图理解或规范化 `payload`，就会在厂商升级时成为故障点，并可能改写桥接身份三元组导致桥接永久降级。代价是 relay 无法做内容层面的过滤或审计——这对本项目的目标（内容不经第三方）无影响，因为 relay 与消费方同属自有控制域；若将来需要审计，正确的位置是终端侧解密之后，而非 relay。
 
@@ -106,11 +106,11 @@ Web 端 relay 地址硬编码（`overrideUrl: void 0`），因此"终端如何�
 1. **入口 bundle 一律回源校验**。它在内存里被 patch 过，内容已与文件名里的哈希不符，因此不得发 `immutable`（会把旧 relay 地址钉死一年），也不宜发 `no-store`（会让浏览器每次页面加载都重下整个入口，实测 4.6 MiB）。正确做法是 `no-cache` 加强 ETag：浏览器留副本、复用前回源校验一次、未变时回 304。是否命中按文件名形状（`assets/index-<hash>.js`）判定，而非 `prepare()` 探到的那个具体名字，以免这条不变量依赖调用顺序。
 2. **磁盘流式发送必须让流在客户端中断时被销毁，不能只"暂停"**。最初用 `createReadStream(...).pipe(res)`：客户端断开时 `pipe` 只会 unpipe 并暂停源流，既不销毁它、也不触发 autoClose，于是每个中断请求永久泄漏一个文件 fd（实测 12 次中断泄漏 12 个，约两百次即 EMFILE）。迁移前改用核心原语 `stream.pipeline`；迁移到 Hono 后由 `new Response(file.readable)` 承担同一职责（响应结束、出错或客户端中断时流被取消，Deno 文件资源随之释放）。回归测试见 `test/assets-abort.test.ts`，它用 lsof 直接数进程的 REG fd，不看实现。
 3. **外壳与入口是内存缓冲，不参与流式路径**，因此上述 fd 风险只存在于那约 2500 个静态 chunk 上。
-4. **压缩一律走 zlib 的异步接口，绝不用 `*Sync`**。relay 的帧转发与 asset server 同进程同事件循环，同步压入口那 4.6 MiB 会把这段时间的所有 WS 帧卡住。实测异步压一个 2.05 MiB 的 chunk 期间事件循环最大阻塞 2.0 ms，而同样内容同步压约需 25 ms。
-5. **压缩的产物随表示变化**。br 与 identity 是同一资源的两种表示，故 ETag 必须按实际送出的字节计算，否则 304 会把 br 的指纹配到 identity 的字节上（`src/assets/validators.ts` 的 `strongEtag`）。凡是可能被压缩的资源都要声明 `Vary: Accept-Encoding`，**包括这次发的是原文的情况**，否则共享缓存可能把原文回给明确要求 br 的客户端。
-6. **只压文本类且达阈值的资源**（`src/assets/encoding.ts` 的 `isCompressible`）。PNG/MP3/woff2 已是压缩格式，wasm 是二进制且单文件最大 4 MiB；树里约两千个几百字节的图标 chunk 由 1 KiB 阈值挡住。门槛按扩展名而非"内容可不可压"，否则每压一个文件都要先试一次。
+4. **压缩由中间件承担，不做预热与缓存**。`hono/compress` 只支持 gzip/deflate（无 br），按内容类型与 1 KiB 阈值决定是否压缩，每请求实时压缩、无产物缓存。代价是首屏体积大于旧的自研 br 路径，且 wasm 这类二进制也会被尝试压缩——这是改用内置特性的已知代价。
+5. **ETag 由中间件按最终字节生成**。`hono/etag` 对送出的字节算 SHA-1，gzip 与 identity 是不同字节故指纹自然不同；命中 `If-None-Match` 时回 304（带 ETag、`Cache-Control` 与 `Vary`）。本仓库不再维护按表示的校验符与 304 分支。
+6. **只压文本类且达阈值的资源**。中间件按内容类型表与 1 KiB 阈值决定（`hono/compress` 默认）：PNG/MP3/woff2 不在可压类型表里故不压；约两千个几百字节的图标 chunk 由阈值挡住。注意 wasm 与 ttf 在默认表内，会被压缩——这是改用内置特性的已知代价。
 
-实测收益（2026-10-09 抓取的构建）：首屏那 84 个资源合计 8.11 MiB，经 br 后 1.94 MiB，省 76%。入口 bundle 在迁移到 Deno/Hono 后重新量过：identity 4,821,644 字节 → br 1,129,235 字节，解压后与 identity 逐字节一致（同一构建下旧的 Node 实测记为 1,130,750 字节，差异来自 zlib 版本，压缩比结论不变）。外壳与入口在 `prepare()` 时预热 br，故请求路径上是零压缩开销。
+实测收益（2026-10-09 抓取的构建，自研 br 路径下的数字，迁移到中间件后 gzip 体积约为其 1.1 倍）：首屏那 84 个资源合计 8.11 MiB，经 br 后 1.94 MiB，省 76%。外壳与入口在旧路径下 `prepare()` 时预热 br，请求路径零压缩开销；中间件路径下改为每请求实时压缩，不再预热。
 
 ## 4. 可视化
 

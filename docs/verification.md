@@ -211,9 +211,9 @@ op/resource 泄漏检查按用例归属这类 timer，于是它会以"跨用例�
 | `vendor-assets/assets/index-B-ilXaCQ.js` sha256 | `ba8a371a8df195ae1014e9bc448e2db5c8b5c61b0907d1bf2a81cfb9e318eca4`（与 `manifest.json` 及 `patching.md §2.1` 记录一致） |
 | 服务端内存 overlay 的 patch 产物 | 4,821,509 → 4,821,644 字节，**增量 135**（与 `patching.md §2.1` 记录一致） |
 | 磁盘上的厂商资源是否被改写 | 否，sha256 逐字节未变 |
-| 入口 bundle 的 br 与 identity | br 1,129,235 字节；解压后与 identity 的 4,821,644 字节逐字节一致 |
+| 入口 bundle 的压缩（中间件 gzip；旧自研 br 路径曾量得 1,129,235 字节） | gzip 由中间件每请求实时生成，解压后与 identity 的 4,821,644 字节逐字节一致（`assets.test.ts` 的 gzip 用例覆盖） |
 | 同端口 HTTP + WS 认证 | `device_register_init` → `device_register_ack` → `auth_challenge` → `auth_ack{pair_status:"waiting"}` 在 `src/serve/main.ts` 上跑通 |
-| `just test` / `just lint` | 149 个用例全绿；`deno check src test` 无错 |
+| `just test` / `just lint` | 137 个用例全绿；`deno check src test` 无错 |
 
 ## 复现命令
 

@@ -10,10 +10,11 @@
  *   /remote/v4/latest/<path>  具体资源（入口 bundle 走内存 overlay）
  *   /remote/v4/<其他>         外壳（SPA 应用路由）
  *
- * 分工很明确：路由、方法分派、HEAD、404/405、流式响应与连接中断时的清理
- * 由 Hono + Deno.serve 的 Response 机制承担；而**缓存语义与内容协商不交**——
- * 按表示计算的强校验符、入口 bundle 不得发 immutable、Vary 的声明范围
- * 都是本项目照证据定下的领域判断（design.md §3 的托管不变式）。
+ * 内容协商与条件请求由 Hono 内置中间件承担（`hono/compress` 的 gzip 与
+ * `hono/etag` 的 SHA-1 ETag + 304），只挂在 `/remote/v4` 子树上；
+ * 状态页与 WS 路由不受影响。本仓库保留的领域判断只有：按资源类的
+ * 缓存策略（外壳与入口 `no-cache`、哈希资源 `immutable`）、入口 bundle
+ * 不得发 `immutable`、内存 overlay 与路径越界判定。
  *
  * 路径从请求 URL 的 pathname 取：`new URL(c.req.url).pathname` 保留 `%2f`
  * 的编码形态（实测），于是 `..%2f..%2findex.html` 仍留在 assets/ 前缀内、
@@ -21,9 +22,10 @@
  */
 
 import type { Context, Hono } from "hono";
+import { compress } from "hono/compress";
+import { etag } from "hono/etag";
 
 import type { Logger } from "../relay/relay.ts";
-import { isCompressible, negotiateEncoding, type Variant } from "./encoding.ts";
 import {
   AssetProvider,
   CACHE_IMMUTABLE,
@@ -33,7 +35,6 @@ import {
   LOG_PREFIX,
   SHELL_PATHS,
 } from "./provider.ts";
-import { etagMatches } from "./validators.ts";
 
 export interface AssetRoutesOptions {
   readonly provider: AssetProvider;
@@ -58,43 +59,21 @@ function baseHeaders(contentType: string): Record<string, string> {
   };
 }
 
-/** 送出内存里的某个表示，并处理条件请求。
- *
- * 命中 If-None-Match 时回 304 且不带正文——这正是 no-cache 的价值所在：
- * 浏览器留着副本，只用一次条件请求确认，无需重下整个入口 bundle。
- *
- * 校验符属于**该表示**（br 与 identity 的 ETag 不同），故必须先用协商结果
- * 选出变体、再比对指纹，顺序不能反。304 同样声明 Vary，否则共享缓存会把
- * 这份 304 的含义配到错误的表示上。
+/**
+ * 送出内存字节。ETag 与 304 由 `etag()` 中间件在最终字节上生成；
+ * 这里只定内容类型、缓存策略与长度。HEAD 只回头不带正文。
  */
-function variantResponse(
+function memoryResponse(
   c: Context,
   relativePath: string,
-  variant: Variant,
+  body: Uint8Array,
   cacheControl: string,
-  vary: boolean,
 ): Response {
-  const { body, encoding, etag } = variant;
   const headers: Record<string, string> = {
     ...baseHeaders(contentTypeFor(relativePath)),
-    "cache-control": cacheControl,
-    "etag": etag,
     "content-length": String(body.byteLength),
+    "cache-control": cacheControl,
   };
-  if (vary) headers["vary"] = "Accept-Encoding";
-  if (encoding !== null) headers["content-encoding"] = encoding;
-
-  if (etagMatches(c.req.header("if-none-match"), etag)) {
-    // 304 不带正文，但必须回 ETag 与 Cache-Control，
-    // 否则浏览器无法把这次命中与已存的副本关联起来。
-    const notModified: Record<string, string> = {
-      "etag": etag,
-      "cache-control": cacheControl,
-    };
-    if (vary) notModified["vary"] = "Accept-Encoding";
-    return new Response(null, { status: 304, headers: notModified });
-  }
-
   if (c.req.method === "HEAD") return new Response(null, { status: 200, headers });
   // 运行接受任何 Uint8Array；断言只为绕开 TS 6 的 ArrayBufferLike 泛型。
   return new Response(body as unknown as BodyInit, { status: 200, headers });
@@ -102,9 +81,7 @@ function variantResponse(
 
 /** 送出外壳。四个入口路径与 SPA fallback 都走这里。 */
 async function shellResponse(c: Context, provider: AssetProvider): Promise<Response> {
-  const store = await provider.shellStore();
-  const variant = await store.select(negotiateEncoding(c.req.header("accept-encoding")));
-  return variantResponse(c, "index.html", variant, CACHE_REVALIDATE, true);
+  return memoryResponse(c, "index.html", await provider.shell(), CACHE_REVALIDATE);
 }
 
 /** 送出 /remote/v4/latest/ 下的一个资源。 */
@@ -115,10 +92,9 @@ async function assetResponse(
   relativePath: string,
 ): Promise<Response> {
   // 入口 bundle：送出内存中的 patched 版本
-  const patched = provider.patchedStore;
+  const patched = provider.patchedEntry;
   if (patched !== null && provider.isEntryPath(relativePath)) {
-    const variant = await patched.select(negotiateEncoding(c.req.header("accept-encoding")));
-    return variantResponse(c, relativePath, variant, CACHE_REVALIDATE, true);
+    return memoryResponse(c, relativePath, patched, CACHE_REVALIDATE);
   }
 
   let absolute: string | null;
@@ -155,22 +131,12 @@ async function assetResponse(
   // 走到这里说明入口没有内存 overlay（patch 关闭，或磁盘上已被 patch）。
   // 后者内容同样与文件名哈希不符，故入口路径一律要求回源校验。
   const cacheControl = provider.isEntryPath(relativePath) ? CACHE_REVALIDATE : CACHE_IMMUTABLE;
-  const compressible = isCompressible(relativePath, info.size);
-  const encoding = compressible ? negotiateEncoding(c.req.header("accept-encoding")) : "identity";
-
-  if (encoding !== "identity") {
-    const variant = await provider.compressedFile(absolute, relativePath, encoding);
-    return variantResponse(c, relativePath, variant, cacheControl, true);
-  }
 
   const headers: Record<string, string> = {
     ...baseHeaders(contentTypeFor(relativePath)),
     "content-length": String(info.size),
     "cache-control": cacheControl,
   };
-  // 即使这次发的是未压缩内容也要声明：否则共享缓存可能把这份原文
-  // 回给一个明确要求 br 的客户端。
-  if (compressible) headers["vary"] = "Accept-Encoding";
 
   if (c.req.method === "HEAD") {
     // 只回头不读文件：Hono 会把 GET 处理器用于 HEAD，若直接开流再丢弃，
@@ -180,7 +146,7 @@ async function assetResponse(
 
   // 流式响应：Response 的 body 接 Deno 文件的 Web 流。客户端中途断开时
   // 流被取消，文件资源随之释放（回归测试 test/assets-abort.test.ts 用 lsof
-  // 直接数进程的 REG fd，不看实现）。
+  // 直接数进程的 REG fd，不看实现）。压缩与 ETag 由中间件在该流上完成。
   const file = await Deno.open(absolute, { read: true });
   return new Response(file.readable, { status: 200, headers });
 }
@@ -247,13 +213,15 @@ export function registerAssetRoutes(app: Hono, options: AssetRoutesOptions): voi
 
   // /remote/v4 整棵子树走同一张路径表：状态页之外只有外壳、资源、404 三种结局。
   // Hono 的 GET 处理器同样服务 HEAD（body 由各分支按 method 裁掉），故只需注册 GET。
+  // etag/compress 只挂子树：先注册 etag（外层）再注册 compress（内层），
+  // 使 ETag 按最终送出的字节生成；状态页与 WS 路由不受影响。
   const subtree = (c: Context): Promise<Response> | Response => {
     const pathname = pathnameOf(c);
     if (pathname === null) return new Response(null, { status: 400 });
     return dispatch(c, provider, log, classifyRoute(pathname));
   };
-  app.get(LOG_PREFIX, subtree);
-  app.get(`${LOG_PREFIX}/*`, subtree);
+  app.get(LOG_PREFIX, etag(), compress(), subtree);
+  app.get(`${LOG_PREFIX}/*`, etag(), compress(), subtree);
 
   // 未匹配到任何路由。方法不对时回 405 而不是 404：
   // Hono 默认把所有未匹配都算 404，而既有行为对任何非 GET/HEAD 都回 405。

@@ -18,6 +18,8 @@
     "@std/log": "jsr:@std/log@^0.224.14",
     "@std/path": "jsr:@std/path@^1.1.0",
     "hono": "jsr:@hono/hono@^4.13.13",
+    "hono/compress": "jsr:@hono/hono@^4.13.13/compress",
+    "hono/etag": "jsr:@hono/hono@^4.13.13/etag",
     "@hono/deno": "jsr:@hono/deno@^1.0.3",
     "ws": "npm:ws@^8.18.3",
     "zod": "npm:zod@^4.6.5"

@@ -1,9 +1,10 @@
 /**
  * SPA 资源托管：状态与策略（design.md §3 的 `asset-provider` 模块）。
  *
- * 这里不含 HTTP 机制——路由、方法分派、HEAD、404/405、流式响应都交给 Hono
- * （src/assets/routes.ts）。本文件只回答"该发哪份字节、以及它该带什么缓存语义"：
- * 内容协商、按表示计算的强校验符、入口 bundle 的内存 overlay、路径越界判定。
+ * 这里不含 HTTP 机制——路由、方法分派、HEAD、404/405、流式响应、内容协商
+ * 与 ETag 都交给 Hono（中间件，见 src/assets/routes.ts）。本文件只回答
+ * "该发哪份字节、以及它该带什么缓存语义"：入口 bundle 的内存 overlay、
+ * 路径越界判定、按资源类的缓存策略。
  *
  * 两类运行时改写，都在内存里完成，**磁盘上的厂商资源保持原样**：
  *   1. 外壳注入 relay 地址的 meta 标签
@@ -20,13 +21,6 @@ import * as posix from "@std/path/posix";
 import type { Logger } from "../relay/relay.ts";
 import { applyRelayPatch, inspectAnchors } from "../tools/patch-spa.ts";
 import { utf8ByteLength } from "../protocol/messages.ts";
-import {
-  CompressedCache,
-  type ContentEncoding,
-  type Variant,
-  variantFor,
-  VariantStore,
-} from "./encoding.ts";
 
 const NOOP_LOGGER: Logger = { info: () => {}, warn: () => {} };
 
@@ -90,12 +84,6 @@ export const CACHE_REVALIDATE = "no-cache";
 /** 文件名内含内容哈希、故内容与文件名必然一致：可长期无条件缓存。 */
 export const CACHE_IMMUTABLE = "public, max-age=31536000, immutable";
 
-/**
- * 压缩产物缓存上限。整棵树的压缩产物约 15 MiB，故实际效果是"全缓存"；
- * 这道上限只为防将来资源变大时内存无界增长。
- */
-const COMPRESSED_CACHE_BYTES = 32 * 1024 * 1024;
-
 export interface AssetProviderOptions {
   /** 抓取所得的厂商资源根目录。本服务不会写它。 */
   readonly rootDir: string;
@@ -158,17 +146,11 @@ export class AssetProvider {
   readonly #log: Logger;
   readonly #relayUrl: string | undefined;
   readonly #patchEntry: boolean;
-  /** 外壳（已注入 relay 地址）的各编码变体。 */
-  #shell: VariantStore | null = null;
+  /** 外壳（已注入 relay 地址），构建一次并缓存。 */
+  #shell: Uint8Array | null = null;
   #entryName: string | null = null;
-  /**
-   * 内存中的 patched 入口 bundle 及其变体，磁盘上的原文件不动。
-   * 字节与校验符同生同灭，故合成一个对象——分开存会出现
-   * "有字节没指纹"的中间态。
-   */
-  #patched: VariantStore | null = null;
-  /** 磁盘资源的压缩产物缓存。 */
-  readonly #compressed = new CompressedCache(COMPRESSED_CACHE_BYTES);
+  /** 内存中的 patched 入口 bundle，磁盘上的原文件不动。 */
+  #patched: Uint8Array | null = null;
 
   constructor(options: AssetProviderOptions) {
     this.#root = posix.resolve(options.rootDir);
@@ -186,8 +168,8 @@ export class AssetProvider {
     return this.#entryName;
   }
 
-  /** 内存中的 patched 入口变体集合；未套用时为 null。 */
-  get patchedStore(): VariantStore | null {
+  /** 内存中的 patched 入口；未套用时为 null。 */
+  get patchedEntry(): Uint8Array | null {
     return this.#patched;
   }
 
@@ -197,10 +179,7 @@ export class AssetProvider {
    * 而不是静默送出未 patch 的 bundle（那会让 SPA 悄悄连回厂商 relay）。
    */
   async prepare(): Promise<PrepareReport> {
-    const shellStore = await this.shellStore();
-    // 预热 br：外壳与入口都在首屏关键路径上，把压缩成本挪到接受请求之前。
-    await shellStore.warm("br");
-    const shell = shellStore.identity.body;
+    const shell = await this.shell();
     const html = new TextDecoder().decode(shell);
 
     const entry = findEntryBundle(html) ?? (await this.#scanForEntry());
@@ -223,7 +202,20 @@ export class AssetProvider {
       };
     }
 
-    const source = await Deno.readTextFile(posix.join(this.#root, "assets", entry));
+    let source: string;
+    try {
+      source = await Deno.readTextFile(posix.join(this.#root, "assets", entry));
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+      return {
+        shellBytes: shell.length,
+        entryBundle: entry,
+        patch: "failed",
+        detail: `外壳引用的入口 bundle 缺失：assets/${entry} 不存在。` +
+          `确认目录布局为 <资源目录>/index.html + <资源目录>/assets/*（资源文件不要直接放在根下）。` +
+          `缺文件时重跑抓取补齐（幂等，已抓文件会跳过）：just fetch-assets ${this.#root}`,
+      };
+    }
     const anchors = inspectAnchors(source);
 
     if (anchors.alreadyPatched) {
@@ -246,16 +238,14 @@ export class AssetProvider {
       };
     }
 
-    const patched = applyRelayPatch(source);
-    const store = await VariantStore.create(new TextEncoder().encode(patched), true);
-    await store.warm("br");
-    this.#patched = store;
+    const patched = new TextEncoder().encode(applyRelayPatch(source));
+    this.#patched = patched;
     return {
       shellBytes: shell.length,
       entryBundle: entry,
       patch: "applied",
       detail: `内存 overlay：${String(utf8ByteLength(source))} → ` +
-        `${String(store.identity.body.length)} 字节（磁盘文件未改动）`,
+        `${String(patched.length)} 字节（磁盘文件未改动）`,
     };
   }
 
@@ -279,20 +269,15 @@ export class AssetProvider {
   }
 
   /**
-   * 外壳的变体集合。构建一次并缓存，请求路径上不重算哈希、不重复压缩。
-   * 外壳内嵌 relay 地址，故不可压性不适用——它总是文本，值得压。
+   * 外壳内容（已注入 relay 地址）。构建一次并缓存。
+   * 编码协商与 ETag 由 Hono 中间件承担（见 `src/assets/routes.ts`）。
    */
-  async shellStore(): Promise<VariantStore> {
+  async shell(): Promise<Uint8Array> {
     const cached = this.#shell;
     if (cached !== null) return cached;
-    const store = await VariantStore.create(await this.#buildShell(), true);
-    this.#shell = store;
-    return store;
-  }
-
-  /** 外壳内容（已注入 relay 地址）。 */
-  async shell(): Promise<Uint8Array> {
-    return (await this.shellStore()).identity.body;
+    const built = await this.#buildShell();
+    this.#shell = built;
+    return built;
   }
 
   /**
@@ -320,28 +305,10 @@ export class AssetProvider {
     return absolute;
   }
 
-  /**
-   * 磁盘资源的压缩产物。命中缓存则零成本；否则读一次文件、异步压一次并留住。
-   * 未压缩的变体不入缓存，见 `CompressedCache` 的注释。
-   */
-  async compressedFile(
-    absolute: string,
-    relativePath: string,
-    encoding: ContentEncoding,
-  ): Promise<Variant> {
-    const key = `${encoding}|${relativePath}`;
-    const cached = this.#compressed.get(key);
-    if (cached !== undefined) return cached;
-
-    const variant = await variantFor(encoding, await Deno.readFile(absolute));
-    this.#compressed.set(key, variant);
-    return variant;
-  }
-
   /** 状态页正文。 */
   statusText(): string {
     const patchState = this.#patched !== null
-      ? `已套用（内存 overlay，磁盘未改动）→ ${String(this.#patched.identity.body.length)} 字节`
+      ? `已套用（内存 overlay，磁盘未改动）→ ${String(this.#patched.length)} 字节`
       : this.#entryName === null
       ? "未找到入口 bundle"
       : "未套用（入口原样送出）";
