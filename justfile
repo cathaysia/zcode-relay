@@ -42,12 +42,16 @@ fetch-assets outdir *args:
     deno task --quiet fetch-assets {{outdir}} {{args}}
 
 # 启动自托管 Relay 服务（SPA 资源缺失时自动抓取；若有 Tailscale 则自动配置官方合规 HTTPS 反代）
-serve host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="":
+# assetsdir 未显式传时取 ZCODE_ASSETS_DIR，仍没有则回退 vendor-assets
+serve host="127.0.0.1" port="18899" assetsdir=env_var_or_default("ZCODE_ASSETS_DIR", "vendor-assets") origin="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -f "{{assetsdir}}/index.html" ]; then
-        echo "==> 检测到资源目录 {{assetsdir}} 未就绪，自动抓取 SPA 静态资源..."
-        deno task --quiet fetch-assets {{assetsdir}}
+    # 空串与未设置同义，否则 `export ZCODE_ASSETS_DIR=""` 会把调用方的环境覆盖掉
+    ASSETSDIR="{{assetsdir}}"
+    if [ -z "${ASSETSDIR}" ]; then ASSETSDIR="vendor-assets"; fi
+    if [ ! -f "${ASSETSDIR}/index.html" ]; then
+        echo "==> 检测到资源目录 ${ASSETSDIR} 未就绪，自动抓取 SPA 静态资源..."
+        deno task --quiet fetch-assets ${ASSETSDIR}
     fi
 
     DERIVED_ORIGIN="{{origin}}"
@@ -76,7 +80,7 @@ serve host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="":
 
     export ZCODE_RELAY_HOST="{{host}}"
     export ZCODE_RELAY_PORT="{{port}}"
-    export ZCODE_ASSETS_DIR="{{assetsdir}}"
+    export ZCODE_ASSETS_DIR="${ASSETSDIR}"
     export ZCODE_PUBLIC_ORIGIN="${DERIVED_ORIGIN}"
 
     cleanup() {
@@ -135,7 +139,7 @@ zcode origin="":
     fi
 
 # 一键启动合集：自动在后台启动 Relay 服务，并唤起本机 ZCode 桌面端
-up host="127.0.0.1" port="18899" assetsdir="vendor-assets" origin="":
+up host="127.0.0.1" port="18899" assetsdir=env_var_or_default("ZCODE_ASSETS_DIR", "vendor-assets") origin="":
     #!/usr/bin/env bash
     set -euo pipefail
     (
