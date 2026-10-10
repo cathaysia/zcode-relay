@@ -8,6 +8,7 @@
 import { encodeHex } from "@std/encoding/hex";
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  // 运行接受任何视图；断言只为绕开 TS 6 的 ArrayBufferLike 泛型。
+  const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
   return encodeHex(new Uint8Array(digest));
 }

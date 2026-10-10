@@ -25,6 +25,7 @@ import {
   ENTRY_CONTENT,
   ENTRY_NAME,
   header,
+  inject,
   makeFixtureRoot,
   PNG_NAME,
   RELAY_URL,
@@ -201,7 +202,7 @@ Deno.test("外壳找不到入口时回退扫描资源目录", async () => {
 Deno.test("服务入口 bundle 时送出 patched 内容", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({ url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
+    const res = await inject(app, { url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
     assertEquals(res.statusCode, 200);
     const body = res.body;
 
@@ -214,7 +215,7 @@ Deno.test("服务入口 bundle 时送出 patched 内容", async () => {
 Deno.test("patch 只在内存，磁盘上的厂商资源保持原样", async () => {
   await withFixture(async ({ app, provider, root }) => {
     await provider.prepare();
-    await app.inject({ url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
+    await inject(app, { url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
 
     const onDisk = await Deno.readTextFile(posix.join(root, "assets", ENTRY_NAME));
     assertEquals(onDisk, ENTRY_CONTENT, "磁盘文件必须逐字节未变");
@@ -227,7 +228,7 @@ Deno.test("关闭 patch 时入口原样送出", async () => {
     const report = await provider.prepare();
     assertEquals(report.patch, "disabled");
 
-    const res = await app.inject({ url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
+    const res = await inject(app, { url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
     assertEquals(res.body, ENTRY_CONTENT, "关闭后应送出原始内容");
   }, { patchEntryBundle: false });
 });
@@ -246,12 +247,11 @@ Deno.test("磁盘上已被 patch 过的入口同样要求回源校验", async ()
     assertEquals((await provider.prepare()).patch, "already-patched", "前提：走无 overlay 的路径");
     const app = buildAssetApp(provider);
 
-    const res = await app.inject({ url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
+    const res = await inject(app, { url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
     const cacheControl = header(res, "cache-control");
     assertMatch(cacheControl, /no-cache/);
     assert(!cacheControl.includes("immutable"), "磁盘上的补丁产物同样与文件名哈希不符");
 
-    await app.close();
     await settleEventLoop();
   });
 });
@@ -261,7 +261,7 @@ Deno.test("磁盘上已被 patch 过的入口同样要求回源校验", async ()
 Deno.test("patched 入口要求回源校验，但允许浏览器留副本", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({ url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
+    const res = await inject(app, { url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
     const cacheControl = header(res, "cache-control");
 
     assertMatch(cacheControl, /no-cache/, "允许留副本，但每次复用前回源校验");
@@ -280,11 +280,11 @@ Deno.test("patched 入口要求回源校验，但允许浏览器留副本", asyn
 Deno.test("入口的条件请求命中 304 且不带正文", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const first = await app.inject({ url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
+    const first = await inject(app, { url: `/remote/v4/latest/assets/${ENTRY_NAME}` });
     const etag = header(first, "etag");
     assert(etag, "首次响应必须带 ETag");
 
-    const second = await app.inject({
+    const second = await inject(app, {
       url: `/remote/v4/latest/assets/${ENTRY_NAME}`,
       headers: { "if-none-match": etag },
     });
@@ -298,7 +298,7 @@ Deno.test("入口的条件请求命中 304 且不带正文", async () => {
 Deno.test("指纹不符时不得回 304", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({
+    const res = await inject(app, {
       url: `/remote/v4/latest/assets/${ENTRY_NAME}`,
       headers: { "if-none-match": '"stale-validator"' },
     });
@@ -309,11 +309,11 @@ Deno.test("指纹不符时不得回 304", async () => {
 
 Deno.test("外壳的条件请求命中 304", async () => {
   await withFixture(async ({ app }) => {
-    const first = await app.inject({ url: "/remote/v4/latest/" });
+    const first = await inject(app, { url: "/remote/v4/latest/" });
     const etag = header(first, "etag");
     assert(etag, "外壳响应必须带 ETag");
 
-    const second = await app.inject({
+    const second = await inject(app, {
       url: "/remote/v4/latest/",
       headers: { "if-none-match": etag },
     });
@@ -325,7 +325,7 @@ Deno.test("外壳的条件请求命中 304", async () => {
 Deno.test("带哈希的普通 chunk 仍长期缓存，不做回源校验", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({ url: `/remote/v4/latest/assets/${CHUNK_NAME}` });
+    const res = await inject(app, { url: `/remote/v4/latest/assets/${CHUNK_NAME}` });
     const cacheControl = header(res, "cache-control");
     assertMatch(cacheControl, /immutable/);
     assert(!cacheControl.includes("no-cache"), "immutable 资源不该被迫回源校验");
@@ -341,7 +341,7 @@ Deno.test("状态页在根路径可用并报告 patch 状态", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
     for (const path of ["/", "/healthz"]) {
-      const res = await app.inject({ url: path });
+      const res = await inject(app, { url: path });
       assertEquals(res.statusCode, 200, `${path} 应可用`);
       assertMatch(header(res, "content-type"), /text\/plain/);
       assertMatch(res.body, /zcode-relay asset server/);
@@ -353,7 +353,7 @@ Deno.test("状态页在根路径可用并报告 patch 状态", async () => {
 Deno.test("配对链接落点 /remote/v4 返回外壳并注入 relay 地址", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({ url: "/remote/v4?sid=abc&hash=def&t=1" });
+    const res = await inject(app, { url: "/remote/v4?sid=abc&hash=def&t=1" });
     assertEquals(res.statusCode, 200);
     assertMatch(header(res, "content-type"), /text\/html/);
 
@@ -366,7 +366,7 @@ Deno.test("外壳的各个入口路径都返回外壳", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
     for (const path of ["/remote/v4", "/remote/v4/", "/remote/v4/latest", "/remote/v4/latest/"]) {
-      const res = await app.inject({ url: path });
+      const res = await inject(app, { url: path });
       assertEquals(res.statusCode, 200, `${path} 应返回 200`);
       assertMatch(res.body, /index-AAA111\.js/, `${path} 应返回外壳`);
     }
@@ -375,7 +375,7 @@ Deno.test("外壳的各个入口路径都返回外壳", async () => {
 
 Deno.test("外壳允许留副本但每次回源校验", async () => {
   await withFixture(async ({ app }) => {
-    const shell = await app.inject({ url: "/remote/v4/latest/" });
+    const shell = await inject(app, { url: "/remote/v4/latest/" });
     const cacheControl = header(shell, "cache-control");
     assertMatch(cacheControl, /no-cache/);
     assert(!cacheControl.includes("no-store"), "外壳只有 20 KB，留副本的成本远低于每次重下");
@@ -389,10 +389,9 @@ Deno.test("未注入 relay 地址时不改动外壳", async () => {
   const app = buildAssetApp(provider);
   try {
     await provider.prepare();
-    const res = await app.inject({ url: "/remote/v4/latest/" });
+    const res = await inject(app, { url: "/remote/v4/latest/" });
     assert(!res.body.includes("zcode-relay-ws"), "未配置时不注入");
   } finally {
-    await app.close();
     await Deno.remove(root, { recursive: true });
     await settleEventLoop();
   }
@@ -402,7 +401,7 @@ Deno.test("HEAD 请求返回头部但无正文", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
     // 磁盘流式资源：迁移前显式走"只写头"的分支，现在同样不能为 HEAD 读整个文件
-    const res = await app.inject({
+    const res = await inject(app, {
       method: "HEAD",
       url: `/remote/v4/latest/assets/${CHUNK_NAME}`,
     });
@@ -416,7 +415,7 @@ Deno.test("HEAD 请求返回头部但无正文", async () => {
 Deno.test("HEAD 对压缩表示给出压缩后的长度", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({
+    const res = await inject(app, {
       method: "HEAD",
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
       headers: { "accept-encoding": "br" },
@@ -432,7 +431,7 @@ Deno.test("HEAD 对压缩表示给出压缩后的长度", async () => {
 Deno.test("缺失资源返回 404 且不误回外壳", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({ url: "/remote/v4/latest/assets/nope-Z.js" });
+    const res = await inject(app, { url: "/remote/v4/latest/assets/nope-Z.js" });
     assertEquals(res.statusCode, 404);
     assert(!res.body.includes(ENTRY_NAME), "不得把外壳当作资源返回");
   });
@@ -440,7 +439,7 @@ Deno.test("缺失资源返回 404 且不误回外壳", async () => {
 
 Deno.test("/remote/v4 下的未知路径走 SPA fallback", async () => {
   await withFixture(async ({ app }) => {
-    const res = await app.inject({ url: "/remote/v4/some/deep/route" });
+    const res = await inject(app, { url: "/remote/v4/some/deep/route" });
     assertEquals(res.statusCode, 200);
     assertMatch(res.body, /index-AAA111\.js/);
   });
@@ -449,7 +448,7 @@ Deno.test("/remote/v4 下的未知路径走 SPA fallback", async () => {
 Deno.test("前缀之外的路径返回 404", async () => {
   await withFixture(async ({ app }) => {
     for (const path of ["/other", "/index.html"]) {
-      const res = await app.inject({ url: path });
+      const res = await inject(app, { url: path });
       assertEquals(res.statusCode, 404, `${path} 应为 404`);
     }
   });
@@ -466,7 +465,7 @@ Deno.test("路径穿越不会泄露文件", async () => {
         "/remote/v4/latest/assets/..%2f..%2f..%2fetc%2fpasswd",
       ]
     ) {
-      const res = await app.inject({ url: path });
+      const res = await inject(app, { url: path });
       const body = res.body;
 
       // 关键断言：绝不泄露宿主机文件
@@ -488,13 +487,13 @@ Deno.test("穿越尝试的两种结局都不泄露文件", async () => {
     await provider.prepare();
     // 字面 ../.. 在判定前就按 URL 语义折叠掉了，于是落进 SPA fallback
     // （返回外壳）。这是第一层防护。
-    const collapsed = await app.inject({ url: "/remote/v4/latest/assets/../../index.html" });
+    const collapsed = await inject(app, { url: "/remote/v4/latest/assets/../../index.html" });
     assert(!collapsed.body.includes("lead=function"), "不得返回宿主机文件");
     assertStringIncludes(collapsed.body, ENTRY_NAME, "折叠后应落到外壳");
 
     // 百分号编码的 %2f 不是路径分隔符，因此仍留在 assets/ 前缀内，
     // 交给文件解析器处理并因不存在而失败。这是第二层防护。
-    const encoded = await app.inject({ url: "/remote/v4/latest/assets/..%2f..%2findex.html" });
+    const encoded = await inject(app, { url: "/remote/v4/latest/assets/..%2f..%2findex.html" });
     assertEquals(encoded.statusCode, 404);
     assert(!encoded.body.includes("lead=function"), "不得返回宿主机文件");
   });
@@ -502,7 +501,7 @@ Deno.test("穿越尝试的两种结局都不泄露文件", async () => {
 
 Deno.test("非 GET/HEAD 方法返回 405", async () => {
   await withFixture(async ({ app }) => {
-    const res = await app.inject({
+    const res = await inject(app, {
       method: "POST",
       url: `/remote/v4/latest/assets/${CHUNK_NAME}`,
     });
@@ -513,13 +512,13 @@ Deno.test("非 GET/HEAD 方法返回 405", async () => {
 
 // ---------- 内容协商与压缩 ----------
 //
-// 用 inject（而不是 fetch）：fetch 会自动解压，看不到"服务端真的发了 br"
-// 以及压缩后的字节数。
+// 用 app.request 的 inject 兼容层（而不是 fetch）：fetch 会自动解压，看不到
+// "服务端真的发了 br"以及压缩后的字节数。
 
 Deno.test("可压缩资源在客户端接受 br 时返回 br", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({
+    const res = await inject(app, {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
       headers: { "accept-encoding": "gzip, deflate, br" },
     });
@@ -540,7 +539,7 @@ Deno.test("可压缩资源在客户端接受 br 时返回 br", async () => {
 Deno.test("只接受 gzip 时用 gzip", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({
+    const res = await inject(app, {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
       headers: { "accept-encoding": "gzip, deflate" },
     });
@@ -552,7 +551,7 @@ Deno.test("只接受 gzip 时用 gzip", async () => {
 Deno.test("不接受任何编码时发原文，但仍声明 Vary", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({
+    const res = await inject(app, {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
       headers: { "accept-encoding": "identity" },
     });
@@ -569,7 +568,7 @@ Deno.test("不接受任何编码时发原文，但仍声明 Vary", async () => {
 Deno.test("已压缩格式不做二次压缩", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({
+    const res = await inject(app, {
       url: `/remote/v4/latest/assets/${PNG_NAME}`,
       headers: { "accept-encoding": "br" },
     });
@@ -583,7 +582,7 @@ Deno.test("已压缩格式不做二次压缩", async () => {
 Deno.test("小于阈值的资源不压", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const res = await app.inject({
+    const res = await inject(app, {
       url: `/remote/v4/latest/assets/${CHUNK_NAME}`,
       headers: { "accept-encoding": "br" },
     });
@@ -594,14 +593,14 @@ Deno.test("小于阈值的资源不压", async () => {
 Deno.test("br 表示有自己的校验符，用它协商回 304", async () => {
   await withFixture(async ({ app, provider }) => {
     await provider.prepare();
-    const br = await app.inject({
+    const br = await inject(app, {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
       headers: { "accept-encoding": "br" },
     });
     const etag = header(br, "etag");
     assert(etag, "压缩表示也应有校验符");
 
-    const again = await app.inject({
+    const again = await inject(app, {
       url: `/remote/v4/latest/assets/${BIG_CHUNK_NAME}`,
       headers: { "accept-encoding": "br", "if-none-match": etag },
     });
@@ -613,11 +612,11 @@ Deno.test("br 表示有自己的校验符，用它协商回 304", async () => {
 
 Deno.test("外壳（内存路径）同样按编码协商，且各有自己的校验符", async () => {
   await withFixture(async ({ app }) => {
-    const identity = await app.inject({
+    const identity = await inject(app, {
       url: "/remote/v4/latest/",
       headers: { "accept-encoding": "identity" },
     });
-    const br = await app.inject({
+    const br = await inject(app, {
       url: "/remote/v4/latest/",
       headers: { "accept-encoding": "br" },
     });
@@ -631,7 +630,7 @@ Deno.test("外壳（内存路径）同样按编码协商，且各有自己的校
       "br 与 identity 是不同表示，强校验符必须不同，否则 304 会串表示",
     );
 
-    const again = await app.inject({
+    const again = await inject(app, {
       url: "/remote/v4/latest/",
       headers: { "accept-encoding": "br", "if-none-match": header(br, "etag") },
     });

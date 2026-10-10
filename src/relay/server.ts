@@ -2,10 +2,10 @@
  * WS 接入层（独立模式）：relay 自己监听一个端口，只服务 WebSocket。
  *
  * 若要与 SPA 资源同端口部署，用 src/serve/main.ts —— 它把同一套
- * `registerRelayRoutes` 注册到资源共享的那个 Fastify 实例上。
+ * `registerRelayRoutes` 注册到资源共享的那个 Hono 实例上。
  */
 
-import fastify from "fastify";
+import { Hono } from "hono";
 
 import { type Logger, RelayCore } from "./relay.ts";
 import { registerRelayRoutes } from "./routes.ts";
@@ -21,8 +21,6 @@ export interface RelayServerOptions {
   readonly logger?: Logger;
   /** 帧观测点，用于调试与协议核对。不参与协议语义。 */
   readonly tap?: FrameTap | undefined;
-  /** relay 主动 ping 的周期，见 routes.ts 与 liveness.ts。 */
-  readonly livenessIntervalMs?: number | undefined;
 }
 
 export interface RelayAddress {
@@ -31,50 +29,41 @@ export interface RelayAddress {
 }
 
 export interface RelayServer {
-  /** 供测试注入或直接驱动（app.inject）使用。 */
-  readonly app: Awaited<ReturnType<typeof buildRelayApp>>;
+  /** Hono 应用：测试经 `app.request()` 直接驱动 HTTP 断言；WS 走真实端口。 */
+  readonly app: Hono;
   readonly core: RelayCore;
   readonly address: RelayAddress;
   close(): Promise<void>;
 }
 
-async function buildRelayApp(
-  options: RelayServerOptions,
-  core: RelayCore,
-): Promise<fastify.FastifyInstance> {
+export function buildRelayApp(options: RelayServerOptions, core: RelayCore): Hono {
   const log = options.logger ?? NOOP_LOGGER;
-  const app = fastify({
-    logger: false,
-    // 关服务时连保活连接一起收掉，否则 close 要等对端先走。
-    forceCloseConnections: true,
-  });
-  await registerRelayRoutes(app, {
+  const app = new Hono();
+  registerRelayRoutes(app, {
     path: options.path,
     core,
     logger: log,
     tap: options.tap,
-    livenessIntervalMs: options.livenessIntervalMs,
   });
   return app;
 }
 
 /** 起一个只服务 WebSocket 的 relay；port 传 0 可让系统分配。 */
-export async function startRelayServer(options: RelayServerOptions): Promise<RelayServer> {
+export function startRelayServer(options: RelayServerOptions): Promise<RelayServer> {
   const core = new RelayCore(options.logger ?? NOOP_LOGGER);
-  const app = await buildRelayApp(options, core);
-  await app.listen({ host: options.host, port: options.port });
+  const app = buildRelayApp(options, core);
+  const server = Deno.serve(
+    { hostname: options.host, port: options.port, onListen: () => {} },
+    app.fetch,
+  );
+  const addr = server.addr as Deno.NetAddr;
 
-  const bound = app.server.address();
-  if (bound === null || typeof bound === "string") {
-    throw new Error("relay server has no TCP address");
-  }
-
-  return {
+  return Promise.resolve({
     app,
     core,
-    address: { address: bound.address, port: bound.port },
+    address: { address: addr.hostname, port: addr.port },
     close: async () => {
-      await app.close();
+      await server.shutdown();
     },
-  };
+  });
 }

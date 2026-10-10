@@ -23,7 +23,7 @@ interface Waiter {
   readonly label: string;
   readonly resolve: (msg: Record<string, unknown>) => void;
   readonly reject: (err: Error) => void;
-  readonly timer: number;
+  readonly timer: ReturnType<typeof setTimeout>;
 }
 
 const DEFAULT_TIMEOUT_MS = 4_000;

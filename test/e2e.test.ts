@@ -15,14 +15,6 @@ import { settleEventLoop } from "./helpers/settle.ts";
 const PASS_HASH = await derivePassHash("e2e-test-password");
 const SILENT: Logger = { info: () => {}, warn: () => {} };
 
-/**
- * 用例里把 relay 的主动 ping 周期压到 150 ms（默认 10 s）。
- * 这样"对端只发 FIN、不给关闭帧"的场景能在毫秒级内被判定掉线——
- * 那正是 Deno 的 node:http 兼容层不上报 FIN 时需要靠 liveness 兜住的情况，
- * 见 src/relay/liveness.ts。
- */
-const TEST_LIVENESS_MS = 150;
-
 interface Harness {
   readonly url: string;
   readonly server: RelayServer;
@@ -34,7 +26,6 @@ async function startRelay(): Promise<Harness> {
     port: 0,
     path: "/ws",
     logger: SILENT,
-    livenessIntervalMs: TEST_LIVENESS_MS,
   });
   return { url: `ws://127.0.0.1:${String(server.address.port)}/ws`, server };
 }
@@ -127,8 +118,9 @@ Deno.test("端到端：设备掉线后终端收到 DEVICE_OFFLINE，设备重连
     await device.client.expectPairStatus("matched");
     await terminal.expectPairStatus("matched");
 
-    // terminate 不发关闭帧，只把 TCP 连接丢掉——这正是 Deno 的 node:http
-    // 不上报 FIN 的场景，掉线判定因此完全依赖 relay 主动 ping（liveness.ts）。
+    // terminate 不发关闭帧，只把 TCP 连接丢掉。Deno.serve 会直接上报这次
+    // 关闭（原生 WS 栈不存在 node:http 兼容层丢 FIN 的问题），于是 relay 照常
+    // 走 close 流程发出 DEVICE_OFFLINE。
     device.client.terminate();
     await terminal.expectError("DEVICE_OFFLINE");
     terminal.clear();
@@ -282,7 +274,7 @@ Deno.test("端到端：超过 1MiB 的帧被拒绝", async () => {
     assert(new TextEncoder().encode(oversized).byteLength > MAX_PHYSICAL_FRAME_BYTES);
 
     device.client.sendRaw(oversized);
-    // 合规客户端不会发出超限帧；此处 relay 在 ws 层拒绝，连接关闭
+    // 合规客户端不会发出超限帧；此处 relay 在应用层显式 close(1009)，连接关闭
     await new Promise((r) => setTimeout(r, 300));
     assertEquals(device.client.closed, true, "超限帧应导致连接被拒绝");
   });

@@ -27,8 +27,11 @@ It is not a fork of ZCode; it speaks the wire protocol documented in
   anything it cannot erase, so the runtime enforces this itself.
 - Relative imports MUST carry the `.ts` extension.
 - `deno.lock` MUST be committed; dependency changes MUST update it.
-- Runtime dependencies are `fastify`, `@fastify/websocket`, `ws` (used by
-  `@fastify/websocket` and by the test client) and `@std/*`. Adding a
+- Runtime dependencies are `hono`, `@hono/deno`, `ws` (used only by the
+  test client, which must send the custom `X-Device-ID` header that the
+  WHATWG WebSocket API cannot set), `zod` (startup-only env validation in
+  `src/env.ts`, never on the request path) and `@std/*` (including `@std/log`
+  for service logging via `src/logging.ts`). Adding a
   dependency to the request path MUST be justified in the commit message.
 
 ## Deno-Specific Requirements
@@ -43,29 +46,31 @@ It is not a fork of ZCode; it speaks the wire protocol documented in
   `TextDecoder`). `Buffer` MUST NOT be used.
 - Node globals (`process`, `NodeJS.*`) MUST NOT be used; use `Deno.env`,
   `Deno.args`, `Deno.build.os`, `Deno.exit` and friends.
-- Deno's `node:http` compatibility layer does not report the peer's TCP FIN on
-  an upgraded WebSocket connection. Connection liveness MUST therefore be
-  proven by relay-initiated pings (`src/relay/liveness.ts`); removing them
-  silently disables `DEVICE_OFFLINE`.
+- Deno's native server (`Deno.serve`) reports the peer's TCP close on an
+  upgraded WebSocket connection directly, so no relay-initiated ping is
+  required. Oversize frames MUST be closed explicitly in the application layer
+  (`close(1009)` in `src/relay/accept.ts`); the native stack has no `maxPayload`
+  option. Removing the explicit close silently turns oversize-frame rejection
+  into silent drops, which the end-to-end test pins to connection close.
 
-## HTTP Layer (Fastify)
+## HTTP Layer (Hono)
 
-- Fastify owns transport mechanics: routing, method dispatch, automatic HEAD
-  routes, 404/405, request/response plumbing, and stream teardown when a
-  client aborts.
-- These are domain decisions and MUST NOT be delegated to plugins
-  (`@fastify/static`, `@fastify/etag`, `@fastify/compress`, ...): cache policy
-  per resource class, per-representation ETags, the `Vary` scope, and which
-  resources may be compressed at all. The reasons are recorded as the
-  asset-server invariants in `docs/design.md` §3.
+- Hono owns transport mechanics: routing, method dispatch, HEAD handling,
+  404/405, request/response plumbing, and stream teardown when a
+  client aborts (via `Response` body cancellation).
+- These are domain decisions and MUST NOT be delegated to static/compression
+  helpers: cache policy per resource class, per-representation ETags, the
+  `Vary` scope, and which resources may be compressed at all. The reasons are
+  recorded as the asset-server invariants in `docs/design.md` §3.
 - Content negotiation MUST keep "an explicitly listed encoding wins over `*`"
-  (RFC 9110 §12.5.3). `@fastify/accept-negotiator` violates this for
-  `br;q=0, *`; it MUST NOT be used.
+  (RFC 9110 §12.5.3). Generic accept-negotiators that select `br` for
+  `br;q=0, *` MUST NOT be used.
 - Path routing MUST derive the filesystem path from the URL pathname after URL
   normalization (see `classifyRoute` in `src/assets/routes.ts`), not from the
   router's decoded wildcard parameter.
-- WebSocket routes MUST be registered through `@fastify/websocket`, and live
-  sockets MUST be terminated on close so shutdown does not wait on clients.
+- WebSocket routes MUST be registered through `@hono/deno`'s
+  `upgradeWebSocket`, and the server MUST be shut down via
+  `Deno.HttpServer.shutdown()` so shutdown does not wait on clients.
 
 ## Tests
 

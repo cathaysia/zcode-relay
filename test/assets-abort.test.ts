@@ -6,9 +6,9 @@
  * 永久泄漏一个文件 fd。实测 20 次中断泄漏 20 个，约两百次后 EMFILE。
  * 换成核心原语 `stream.pipeline` 后泄漏为 0。
  *
- * 迁移到 Fastify 后这条不变式换了承载者：`reply.send(stream)` 在响应结束或
- * 出错时销毁源流，客户端中断也走这条路。测试因此原样保留——它守的是不变式，
- * 不是某段实现。
+ * 迁移到 Hono 后这条不变式换了承载者：`new Response(file.readable)` 的流
+ * 在客户端中断时被取消，Deno 文件资源随之释放。测试因此原样保留——它守的
+ * 是不变式，不是某段实现。
  *
  * 为什么这条路径值得单独一个文件：被服务的是磁盘上的静态 chunk（约 2500 个），
  * 手机上加载到一半切走、下拉刷新、被后续导航取代都会走到这里；
@@ -17,10 +17,9 @@
 
 import { assert, assertEquals } from "@std/assert";
 import * as posix from "@std/path/posix";
-import type { FastifyInstance } from "fastify";
 
 import { AssetProvider } from "../src/assets/provider.ts";
-import { buildAssetApp, makeFixtureRoot, RELAY_URL } from "./helpers/asset-app.ts";
+import { buildAssetApp, inject, makeFixtureRoot, RELAY_URL } from "./helpers/asset-app.ts";
 import { countRegularFds } from "./helpers/open-fds.ts";
 
 /** 必须够大，否则在 loopback 上会在断开之前就写完，测不到中断。 */
@@ -73,7 +72,7 @@ Deno.test({
   //
   // 关掉检查并不降低这条用例的强度：它真正要守的是"中断的传输不留文件
   // 描述符"，而那是由 lsof 直接数进程的 REG fd 得到的——比 Deno 的
-  // resource 检查更强（后者看不到 node:fs 流持有的 fd）。
+  // resource 检查更强。
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
@@ -81,14 +80,12 @@ Deno.test({
     await Deno.writeFile(posix.join(root, "assets", BIG_NAME), new Uint8Array(BIG_BYTES).fill(65));
 
     const provider = new AssetProvider({ rootDir: root, relayUrl: RELAY_URL });
-    let app: FastifyInstance | null = null;
+    let server: Deno.HttpServer | null = null;
     try {
       await provider.prepare();
-      app = buildAssetApp(provider);
-      await app.listen({ host: "127.0.0.1", port: 0 });
-      const bound = app.server.address();
-      assert(bound !== null && typeof bound !== "string", "app 必须有 TCP 地址");
-      const port = bound.port;
+      const app = buildAssetApp(provider);
+      server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, app.fetch);
+      const port = (server.addr as Deno.NetAddr).port;
 
       // 基线取在服务已就绪之后：这样只有"中断的传输"能解释后续的增长
       const before = countRegularFds();
@@ -110,11 +107,11 @@ Deno.test({
       );
 
       // 确认服务仍然可用，排除"靠出错而没泄漏"这种假通过
-      const res = await app.inject({ url: `/remote/v4/latest/assets/${BIG_NAME}` });
+      const res = await inject(app, { url: `/remote/v4/latest/assets/${BIG_NAME}` });
       assertEquals(res.statusCode, 200);
       assertEquals(res.rawPayload.byteLength, BIG_BYTES);
     } finally {
-      if (app !== null) await app.close();
+      if (server !== null) await server.shutdown();
       await Deno.remove(root, { recursive: true });
     }
   },

@@ -1,9 +1,10 @@
 /**
- * 连接抽象。把 ws 实现细节挡在核心逻辑之外，便于测试注入假连接。
+ * 连接抽象。把 WS 实现细节挡在核心逻辑之外，便于测试注入假连接。
  * 见 docs/design.md §6。
  *
- * 这里连 `ws` 的类型都不引用：@fastify/websocket 交来的 socket **结构上**
- * 满足 RelaySocket，故 relay 核心与 ws、Fastify 都没有编译期耦合。
+ * 服务端跑在 Hono（`@hono/deno` 的 upgradeWebSocket，即 Deno 原生
+ * WebSocket）上：`HonoWsConn` 包装的是 `WSContext`，只用 `send` / `close` /
+ * `readyState` 三个成员。relay 核心与 Hono、Deno WS 都没有编译期之外的耦合。
  */
 
 import type { Outbound } from "../protocol/messages.ts";
@@ -11,27 +12,17 @@ import { errorMessage, serializeOutbound } from "../protocol/messages.ts";
 import type { RelayErrorCode } from "../protocol/limits.ts";
 import { createConnId } from "../protocol/crypto.ts";
 
+/** Hono WSContext 实际用到的最小结构子集（`send` / `close` / `readyState`）。 */
+export interface HonoWs {
+  readonly readyState: number;
+  send(data: string | ArrayBuffer | Uint8Array): void;
+  close(code?: number, reason?: string): void;
+}
+
 /** 帧观测点。用于 echo-relay 之类需要看到双向原始报文的地方，不参与协议语义。 */
 export interface FrameTap {
   onInbound(connId: string, text: string): void;
   onOutbound(connId: string, text: string): void;
-}
-
-/** 够用的 WebSocket 子集；ws 的 WebSocket 实例可直接满足它。 */
-export interface RelaySocket {
-  readonly readyState: number;
-  readonly OPEN: number;
-  send(data: string): void;
-  close(): void;
-  /** 立即断开，不发关闭帧。存活检测判定连接已死时用它。 */
-  terminate(): void;
-  /** 发一个 ping。对端（浏览器或 ws 客户端）会自动回 pong。 */
-  ping(): void;
-  /** ws 的事件订阅。回调载荷按 unknown 接收，解码在 attachConnection 里做。 */
-  on(event: "message", listener: (data: unknown) => void): unknown;
-  on(event: "close", listener: () => void): unknown;
-  on(event: "error", listener: (error: Error) => void): unknown;
-  on(event: "pong", listener: () => void): unknown;
 }
 
 export interface Conn {
@@ -55,36 +46,43 @@ export interface Conn {
   close(): void;
 }
 
-export interface WsConnOptions {
-  readonly socket: RelaySocket;
+export interface HonoWsConnOptions {
+  readonly ws: HonoWs;
   readonly queryMid: string | undefined;
   readonly deviceIdHeader: string | undefined;
   readonly tap?: FrameTap | undefined;
 }
 
-export class WsConn implements Conn {
+/**
+ * WSContext 包装。`readyState === 1` 即 OPEN（见 hono/ws 的 WSReadyState）。
+ *
+ * 注意 Deno 原生 WS 没有 ping/terminate：存活检测不靠 relay 主动 ping，
+ * 靠 Deno.serve 对 TCP 关闭的直接上报（见 docs/verification.md §L1）。
+ * 超限帧也在应用层显式 close（1009），而不是靠 ws 库的 maxPayload。
+ */
+export class HonoWsConn implements Conn {
   readonly id: string = createConnId();
   readonly queryMid: string | undefined;
   readonly deviceIdHeader: string | undefined;
 
-  readonly #socket: RelaySocket;
+  readonly #ws: HonoWs;
   readonly #tap: FrameTap | undefined;
 
-  constructor(options: WsConnOptions) {
-    this.#socket = options.socket;
+  constructor(options: HonoWsConnOptions) {
+    this.#ws = options.ws;
     this.queryMid = options.queryMid;
     this.deviceIdHeader = options.deviceIdHeader;
     this.#tap = options.tap;
   }
 
   get isOpen(): boolean {
-    return this.#socket.readyState === this.#socket.OPEN;
+    return this.#ws.readyState === 1;
   }
 
   sendRaw(text: string): void {
     if (!this.isOpen) return;
     this.#tap?.onOutbound(this.id, text);
-    this.#socket.send(text);
+    this.#ws.send(text);
   }
 
   send(msg: Outbound): void {
@@ -96,6 +94,19 @@ export class WsConn implements Conn {
   }
 
   close(): void {
-    this.#socket.close();
+    try {
+      this.#ws.close();
+    } catch {
+      // 已关闭时忽略
+    }
+  }
+
+  /** 超限帧：显式以 1009 关闭，对端看到 closed=true（此前由 ws 库的 maxPayload 承担）。 */
+  closeForOversize(): void {
+    try {
+      this.#ws.close(1009, "message too large");
+    } catch {
+      // 已关闭时忽略
+    }
   }
 }

@@ -1,7 +1,7 @@
 /**
  * SPA 资源托管：状态与策略（design.md §3 的 `asset-provider` 模块）。
  *
- * 这里不含 HTTP 机制——路由、方法分派、HEAD、404/405、流式响应都交给 Fastify
+ * 这里不含 HTTP 机制——路由、方法分派、HEAD、404/405、流式响应都交给 Hono
  * （src/assets/routes.ts）。本文件只回答"该发哪份字节、以及它该带什么缓存语义"：
  * 内容协商、按表示计算的强校验符、入口 bundle 的内存 overlay、路径越界判定。
  *

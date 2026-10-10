@@ -19,7 +19,8 @@ import { encodeBase64Url } from "@std/encoding/base64url";
  * 用 Web Crypto 而不是 node:crypto：Deno 原生支持，且是唯一的摘要入口。
  */
 export async function strongEtag(body: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", body);
+  // 运行接受任何视图；断言只为绕开 TS 6 的 ArrayBufferLike 泛型。
+  const digest = await crypto.subtle.digest("SHA-256", body as unknown as BufferSource);
   return `"${encodeBase64Url(new Uint8Array(digest))}"`;
 }
 

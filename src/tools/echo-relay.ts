@@ -22,8 +22,10 @@ import type { FrameTap } from "../relay/conn.ts";
 import type { Logger } from "../relay/relay.ts";
 import { getPlatformConfigGuide } from "../platform.ts";
 import { utf8ByteLength } from "../protocol/messages.ts";
+import { loadEchoEnvOrExit } from "../env.ts";
 
-const SHOW_SECRETS = Deno.env.get("ZCODE_ECHO_SHOW_SECRETS") === "1";
+const echoEnv = loadEchoEnvOrExit();
+const SHOW_SECRETS = echoEnv.ZCODE_ECHO_SHOW_SECRETS;
 
 function ts(): string {
   return new Date().toISOString().slice(11, 23);
@@ -139,9 +141,9 @@ const logger: Logger = {
   },
 };
 
-const host = Deno.env.get("ZCODE_RELAY_HOST")?.trim() ?? "127.0.0.1";
-const port = Number(Deno.env.get("ZCODE_RELAY_PORT")?.trim() ?? "18899");
-const path = Deno.env.get("ZCODE_RELAY_PATH")?.trim() ?? "/ws";
+const host = echoEnv.ZCODE_RELAY_HOST;
+const port = echoEnv.ZCODE_RELAY_PORT;
+const path = echoEnv.ZCODE_RELAY_PATH;
 
 const server = await startRelayServer({ host, port, path, logger, tap });
 const { address } = server;

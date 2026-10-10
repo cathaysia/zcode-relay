@@ -1,7 +1,7 @@
 /**
  * 让事件循环再跑一小段，把刚排定的收尾 timer 跑完。
  *
- * 为什么需要它：Fastify 的 `close()` 在 Deno 的 node:http 兼容层上还会排一个
+ * 为什么需要它：HTTP/WS 服务的 `shutdown()` 还会排一个
  * 短延时（实测 1–2 ms）的清理 timer。Deno 的 op 泄漏检查是**按用例**归属
  * op 的，这个 timer 若跨过用例边界就会被判成"泄漏"（前一个用例报
  * started-but-never-completed，后一个用例报 started-before-but-completed）。

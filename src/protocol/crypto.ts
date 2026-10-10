@@ -95,8 +95,9 @@ export async function verifyProof(
   return await crypto.subtle.verify(
     "HMAC",
     await hmacKey(passHash),
-    signature,
-    UTF8.encode(`${nonce}|${role}|${deviceSid}`),
+    // 运行接受任何视图；断言只为绕开 TS 6 的 ArrayBufferLike 泛型。
+    signature as unknown as BufferSource,
+    UTF8.encode(`${nonce}|${role}|${deviceSid}`) as unknown as BufferSource,
   );
 }
 
